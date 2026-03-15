@@ -1,8 +1,31 @@
-# https://dart.dev/guides/libraries/private-files
-# Created by `dart pub`
+﻿# Flutter/Dart/Pub related
 .dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
 
-.gitignore
+# Android related
+.gradle/
+android/.gradle/
+android/app/.gradle/
+android/build/
+android/app/build/
+*.iml
+.idea/
+*.keystore
+
+# iOS related
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/ephemeral/
+ios/Podfile.lock
+ios/.generated/
 
 # macOS
 .DS_Store
@@ -10,6 +33,7 @@
 *.swp
 *.swo
 *~
+._*
 
 # Logs
 *.log
@@ -24,4 +48,22 @@ logs/
 *.apk
 *.aab
 *.ipa
-*.dSYM.zip
+*.dill
+
+# Music files (用户资源)
+Music/
+
+# Test coverage
+coverage/
+
+# Generated files
+*.g.dart
+*.freezed.dart
+
+# Miscellaneous
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.dylib
