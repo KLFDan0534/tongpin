@@ -89,7 +89,7 @@ class AudioDistributor {
       final info = AudioSourceInfo(
         sourceId: sourceId,
         filePath: filePath,
-        displayName: displayName ?? filePath.split('/').last,
+        displayName: displayName ?? filePath.split(Platform.pathSeparator).last,
         fileSize: stat.size,
         hash: hash,
         codec: _detectCodec(filePath),

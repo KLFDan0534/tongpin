@@ -120,7 +120,7 @@ class CalibrationService extends ChangeNotifier {
       _calibrationOffsetMs = preset.calibrationOffsetMs;
       _latencyCompMs = preset.latencyCompMs;
     } else if (Platform.isIOS) {
-      _calibrationOffsetMs = 150;
+      _calibrationOffsetMs = 65;
       _latencyCompMs = 100;
     } else {
       return;

@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/sync_v2/playback_sync/sync_controller.dart';
 import '../../core/sync_v2/room_discovery/discovered_room.dart';
@@ -12,7 +14,6 @@ import '../../core/sync_v2/distributor/track_meta.dart';
 import '../../core/sync_v2/distributor/audio_cache.dart';
 import '../../core/sync_v2/future_start/future_start_controller.dart';
 import '../../core/sync_v2/diagnostics/sync_diagnostics.dart';
-import '../../core/sync_v2/diagnostics/sync_metrics.dart';
 
 /// 延迟元素（用于延迟分解面板）
 class _LatencyItem {
@@ -71,75 +72,73 @@ class _SyncLabPageState extends State<SyncLabPage> {
         title: const Text('Sync Lab / 同步实验室'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          // 连接状态区块
-          _buildConnectionSection(),
-          const Divider(),
+      body: AnimatedBuilder(
+        animation: _controller.throttledNotifier,
+        builder: (context, child) {
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              // 连接状态区块
+              _buildConnectionSection(),
+              const Divider(),
 
-          // 角色选择
-          _buildRoleSection(),
-          const Divider(),
+              // 角色选择
+              _buildRoleSection(),
+              const Divider(),
 
-          // 房间控制
-          _buildRoomControlSection(),
-          const Divider(),
+              // 房间控制
+              _buildRoomControlSection(),
+              const Divider(),
 
-          // 房间列表（Client）
-          if (_controller.role == SyncRole.none ||
-              _controller.role == SyncRole.client)
-            _buildRoomListSection(),
-          const Divider(),
+              // 房间列表（Client）
+              if (_controller.role == SyncRole.none ||
+                  _controller.role == SyncRole.client)
+                _buildRoomListSection(),
+              const Divider(),
 
-          // 音源控制（Host）
-          if (_controller.role == SyncRole.host) _buildAudioSourceSection(),
-          const Divider(),
+              // 音源控制（Host）
+              if (_controller.role == SyncRole.host) _buildAudioSourceSection(),
+              const Divider(),
 
-          // Client 曲目卡片
-          if (_controller.role == SyncRole.client) _buildClientTrackSection(),
-          const Divider(),
+              // Client 曲目卡片
+              if (_controller.role == SyncRole.client)
+                _buildClientTrackSection(),
+              const Divider(),
 
-          // 播放控制
-          _buildPlaybackControlSection(),
-          const Divider(),
+              // FutureStart 同起开播
+              _buildFutureStartSection(),
+              const Divider(),
 
-          // 同步控制
-          _buildSyncControlSection(),
-          const Divider(),
+              // 同步控制
+              _buildSyncControlSection(),
+              const Divider(),
 
-          // 校准按钮
-          _buildCalibrationSection(),
-          const Divider(),
+              // 校准按钮
+              _buildCalibrationSection(),
+              const Divider(),
 
-          // FutureStart 同起开播
-          _buildFutureStartSection(),
-          const Divider(),
+              // Catch-up 追帧（Client）
+              if (_controller.role == SyncRole.client) _buildCatchUpSection(),
+              const Divider(),
 
-          // Catch-up 追帧（Client）
-          if (_controller.role == SyncRole.client) _buildCatchUpSection(),
-          const Divider(),
+              // KeepSync 持续同步（Client）
+              if (_controller.role == SyncRole.client) _buildKeepSyncSection(),
+              const Divider(),
 
-          // KeepSync 持续同步（Client）
-          if (_controller.role == SyncRole.client) _buildKeepSyncSection(),
-          const Divider(),
+              // 延迟分解面板（Client）
+              if (_controller.role == SyncRole.client)
+                _buildLatencyBreakdownSection(),
+              const Divider(),
 
-          // 延迟分解面板（Client）
-          if (_controller.role == SyncRole.client)
-            _buildLatencyBreakdownSection(),
-          const Divider(),
+              // Clock 区块
+              _buildClockSection(),
+              const Divider(),
 
-          // 指标面板（Client）
-          if (_controller.role == SyncRole.client) _buildMetricsSection(),
-          const Divider(),
-
-          // Clock 区块
-          _buildClockSection(),
-          const Divider(),
-
-          // 诊断面板
-          _buildDiagnosticsPanel(),
-        ],
+              // 诊断面板
+              _buildDiagnosticsPanel(),
+            ],
+          );
+        },
       ),
     );
   }
@@ -248,24 +247,28 @@ class _SyncLabPageState extends State<SyncLabPage> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                ElevatedButton.icon(
-                  onPressed:
-                      _controller.role == SyncRole.client &&
-                          connState == TransportState.connected
-                      ? () => _disconnect()
-                      : null,
-                  icon: const Icon(Icons.link_off),
-                  label: const Text('断开连接'),
-                ),
-                ElevatedButton.icon(
-                  onPressed:
-                      _controller.role == SyncRole.client &&
-                          connState == TransportState.disconnected
-                      ? () => _triggerReconnect()
-                      : null,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('重新连接'),
-                ),
+                // Host 关闭房间按钮
+                if (_controller.role == SyncRole.host)
+                  ElevatedButton.icon(
+                    onPressed: connState == TransportState.hosting
+                        ? () => _closeRoom()
+                        : null,
+                    icon: const Icon(Icons.close),
+                    label: const Text('关闭房间'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                // Client 重新连接按钮
+                if (_controller.role == SyncRole.client)
+                  ElevatedButton.icon(
+                    onPressed: connState == TransportState.disconnected
+                        ? () => _triggerReconnect()
+                        : null,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重新连接'),
+                  ),
               ],
             ),
           ],
@@ -389,21 +392,10 @@ class _SyncLabPageState extends State<SyncLabPage> {
             const SizedBox(height: 12),
 
             // 扫描按钮
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () => _startScanning(),
-                  icon: const Icon(Icons.search),
-                  label: const Text('扫描房间'),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _stopScanning(),
-                  icon: const Icon(Icons.stop),
-                  label: const Text('停止'),
-                ),
-              ],
+            ElevatedButton.icon(
+              onPressed: () => _startScanning(),
+              icon: const Icon(Icons.search),
+              label: const Text('扫描房间'),
             ),
             const SizedBox(height: 12),
 
@@ -497,9 +489,14 @@ class _SyncLabPageState extends State<SyncLabPage> {
                   label: const Text('选择 MP3 文件'),
                 ),
                 ElevatedButton.icon(
-                  onPressed: () => _useDemoAudio(),
-                  icon: const Icon(Icons.music_note),
-                  label: const Text('使用 Demo 音频'),
+                  onPressed: () => _selectMusicFolder(),
+                  icon: const Icon(Icons.folder),
+                  label: const Text('选择音乐文件夹'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () => _selectMp3File(allowMultiple: true),
+                  icon: const Icon(Icons.library_music),
+                  label: const Text('多选音乐文件'),
                 ),
               ],
             ),
@@ -575,27 +572,35 @@ class _SyncLabPageState extends State<SyncLabPage> {
 
       case TrackStatus.serving:
         final meta = state.meta!;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '正在分发:',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: Colors.green,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text('trackId: ${meta.trackId}'),
-            Text('HTTP 端口: 8787'),
-            const SizedBox(height: 8),
-            ElevatedButton.icon(
-              onPressed: () => _stopServingTrack(),
-              icon: const Icon(Icons.stop),
-              label: const Text('停止分发'),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            ),
-          ],
+        return StreamBuilder<Duration>(
+          stream: _controller.positionStream,
+          builder: (context, snapshot) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '正在分发:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.green,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text('trackId: ${meta.trackId}'),
+                Text('HTTP 端口: 8787'),
+                const SizedBox(height: 8),
+                // Host 端进度条
+                _buildProgressBar(true),
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  onPressed: () => _stopServingTrack(),
+                  icon: const Icon(Icons.stop),
+                  label: const Text('停止分发'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                ),
+              ],
+            );
+          },
         );
 
       case TrackStatus.error:
@@ -799,6 +804,51 @@ class _SyncLabPageState extends State<SyncLabPage> {
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
+  /// 构建进度条
+  Widget _buildProgressBar(bool isHost) {
+    final position = _controller.position ?? Duration.zero;
+    final duration = _controller.duration ?? Duration.zero;
+    final durationMs = duration.inMilliseconds;
+    final positionMs = position.inMilliseconds.clamp(0, durationMs);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Text(
+              _formatDuration(position),
+              style: const TextStyle(fontSize: 12),
+            ),
+            Expanded(
+              child: Slider(
+                value: durationMs > 0 ? positionMs.toDouble() : 0,
+                max: durationMs > 0 ? durationMs.toDouble() : 1,
+                onChanged: isHost
+                    ? (value) {
+                        // Host 拖动进度条时广播给 Client
+                        _controller.seekToAndBroadcast(value.toInt());
+                        setState(() {});
+                      }
+                    : null, // Client 不能拖动进度条
+              ),
+            ),
+            Text(
+              _formatDuration(duration),
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        if (isHost)
+          Text(
+            '拖动进度条可同步调整所有 Client 播放位置',
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+          ),
+      ],
+    );
+  }
+
   void _playCachedFile(String localPath) async {
     final success = await _controller.playCachedTrack(localPath);
     if (!mounted) return;
@@ -825,46 +875,134 @@ class _SyncLabPageState extends State<SyncLabPage> {
     ).showSnackBar(SnackBar(content: Text('已清除缓存: $trackId')));
   }
 
-  void _retryDownload() {
-    // TODO: 重新触发下载
+  void _retryDownload() async {
+    final success = await _controller.retryDownload();
+    if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('重试功能待实现')));
+    ).showSnackBar(SnackBar(content: Text(success ? '重试下载成功' : '重试下载失败')));
+    setState(() {});
   }
 
-  /// 播放控制区块
-  Widget _buildPlaybackControlSection() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  /// 上一首
+  void _previousTrack() async {
+    final success = await _controller.previousTrack();
+    if (!mounted) return;
+    if (success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '已切换到上一首 (${_controller.playlistIndex}/${_controller.playlistCount})',
+          ),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('没有上一首')));
+    }
+    setState(() {});
+  }
+
+  /// 下一首
+  void _nextTrack() async {
+    final success = await _controller.nextTrack();
+    if (!mounted) return;
+    if (success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '已切换到下一首 (${_controller.playlistIndex}/${_controller.playlistCount})',
+          ),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('没有下一首')));
+    }
+    setState(() {});
+  }
+
+  /// 显示播放列表底部弹窗
+  void _showPlaylistSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.8,
+        expand: false,
+        builder: (context, scrollController) => Column(
           children: [
-            const Text(
-              '播放控制',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            // 标题栏
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Text(
+                    '播放列表 (${_controller.playlistCount}首)',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () {
+                      _controller.clearPlaylist();
+                      Navigator.pop(context);
+                      setState(() {});
+                    },
+                    child: const Text('清空'),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () => _play(),
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Play'),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _pause(),
-                  icon: const Icon(Icons.pause),
-                  label: const Text('Pause'),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _seek(),
-                  icon: const Icon(Icons.fast_forward),
-                  label: const Text('Seek +500ms'),
-                ),
-              ],
+            const Divider(),
+            // 歌曲列表
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                itemCount: _controller.playlistCount,
+                itemBuilder: (context, index) {
+                  final track = _controller.playlist[index];
+                  final isCurrentTrack = index == _controller.currentIndex;
+                  final fileName = track.fileName ?? '未知曲目';
+
+                  return ListTile(
+                    leading: Icon(
+                      isCurrentTrack ? Icons.play_circle : Icons.music_note,
+                      color: isCurrentTrack ? Colors.green : null,
+                    ),
+                    title: Text(
+                      fileName,
+                      style: TextStyle(
+                        fontWeight: isCurrentTrack ? FontWeight.bold : null,
+                        color: isCurrentTrack ? Colors.green : null,
+                      ),
+                    ),
+                    subtitle: Text(
+                      '${(track.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB • ${track.durationMs ~/ 1000}s',
+                    ),
+                    trailing: isCurrentTrack
+                        ? const Text(
+                            '正在播放',
+                            style: TextStyle(color: Colors.green),
+                          )
+                        : null,
+                    onTap: () async {
+                      if (!isCurrentTrack) {
+                        Navigator.pop(context);
+                        await _controller.playTrackAtIndex(index);
+                        setState(() {});
+                      }
+                    },
+                  );
+                },
+              ),
             ),
           ],
         ),
@@ -874,15 +1012,16 @@ class _SyncLabPageState extends State<SyncLabPage> {
 
   /// FutureStart 同起开播区块
   Widget _buildFutureStartSection() {
-    return StreamBuilder<TrackState>(
-      stream: _controller.trackStateStream,
-      initialData: _controller.trackState,
-      builder: (context, snapshot) {
-        final trackState = snapshot.data!;
+    // 使用 AnimatedBuilder 监听 throttledNotifier，确保 isPlaying 状态实时更新
+    return AnimatedBuilder(
+      animation: _controller.throttledNotifier,
+      builder: (context, child) {
+        final trackState = _controller.trackState;
         final isHost = _controller.role == SyncRole.host;
         final state = _controller.futureStartState;
         final stateStr = state.toString().split('.').last;
         final canStart = _canStartAtFuture(trackState);
+        final isPlaying = _controller.isPlaying;
 
         return Card(
           child: Padding(
@@ -891,7 +1030,7 @@ class _SyncLabPageState extends State<SyncLabPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'FutureStart 同起开播',
+                  '播放控制',
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 12),
@@ -941,16 +1080,66 @@ class _SyncLabPageState extends State<SyncLabPage> {
                 ),
                 const SizedBox(height: 12),
 
-                // 同起按钮（Host）
+                // 播放/暂停按钮（Host）
                 if (isHost)
-                  Opacity(
-                    opacity: canStart ? 1.0 : 0.5,
-                    child: ElevatedButton.icon(
-                      onPressed: canStart ? _startAtFuture : null,
-                      icon: const Icon(Icons.sync),
-                      label: const Text('同起开播'),
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // 上一首按钮
+                      Opacity(
+                        opacity: _controller.hasPreviousTrack ? 1.0 : 0.5,
+                        child: IconButton(
+                          onPressed: _controller.hasPreviousTrack
+                              ? () => _previousTrack()
+                              : null,
+                          icon: const Icon(Icons.skip_previous),
+                          tooltip: '上一首',
+                        ),
+                      ),
+                      // 播放/暂停按钮
+                      Opacity(
+                        opacity: canStart || isPlaying ? 1.0 : 0.5,
+                        child: ElevatedButton.icon(
+                          onPressed: (canStart || isPlaying)
+                              ? _toggleFutureStartOrPause
+                              : null,
+                          icon: Icon(
+                            isPlaying ? Icons.pause : Icons.play_arrow,
+                          ),
+                          label: Text(isPlaying ? '暂停' : '同起开播'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isPlaying
+                                ? Colors.orange
+                                : Colors.green,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                      // 下一首按钮
+                      Opacity(
+                        opacity: _controller.hasNextTrack ? 1.0 : 0.5,
+                        child: IconButton(
+                          onPressed: _controller.hasNextTrack
+                              ? () => _nextTrack()
+                              : null,
+                          icon: const Icon(Icons.skip_next),
+                          tooltip: '下一首',
+                        ),
+                      ),
+                      // 播放列表按钮
+                      IconButton(
+                        onPressed: _controller.playlistCount > 0
+                            ? _showPlaylistSheet
+                            : null,
+                        icon: const Icon(Icons.queue_music),
+                        tooltip: '播放列表 (${_controller.playlistCount})',
+                      ),
+                    ],
                   ),
+
+                // 进度条（Host 和 Client 都显示）
+                if (isHost || _controller.role == SyncRole.client)
+                  _buildProgressBar(isHost),
               ],
             ),
           ),
@@ -972,14 +1161,38 @@ class _SyncLabPageState extends State<SyncLabPage> {
     return true;
   }
 
-  void _startAtFuture() async {
-    debugPrint('[SyncLab]    called');
-    final success = await _controller.startAtFuture();
-    debugPrint('[SyncLab] startAtFuture result: $success');
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(success ? '同起开播已发送' : '同起开播失败')));
+  /// 播放/暂停切换（同起开播或暂停）
+  void _toggleFutureStartOrPause() async {
+    debugPrint(
+      '[SyncLab] _toggleFutureStartOrPause called, isPlaying=${_controller.isPlaying}',
+    );
+    if (_controller.isPlaying) {
+      // 暂停并同步给 Client
+      debugPrint('[SyncLab] 执行暂停并广播');
+      await _controller.pauseAndBroadcast();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('已暂停并同步给所有 Client')));
+    } else {
+      // 检查是否已经播放过（从暂停位置恢复）
+      if (_controller.futureStartState == FutureStartState.started) {
+        debugPrint('[SyncLab] 执行恢复播放并广播');
+        await _controller.resumeAndBroadcast();
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已恢复播放并同步给所有 Client')));
+      } else {
+        // 首次播放，执行同起开播
+        debugPrint('[SyncLab] 执行同起开播');
+        final success = await _controller.startAtFuture();
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(success ? '同起开播已发送' : '同起开播失败')));
+      }
+    }
     setState(() {});
   }
 
@@ -1337,149 +1550,6 @@ class _SyncLabPageState extends State<SyncLabPage> {
     );
   }
 
-  /// 指标面板区块（Client）
-  Widget _buildMetricsSection() {
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final stats30s = _controller.metrics.getStats30s(nowMs);
-    final stats120s = _controller.metrics.getStats120s(nowMs);
-    final dropStats = _controller.metrics.dropStats;
-    final protectMode = _controller.metrics.protectMode;
-    final protectTrigger = _controller.metrics.protectTrigger;
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  '指标面板',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                // 保护模式指示器
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: protectMode == ProtectMode.protect
-                        ? Colors.orange
-                        : Colors.green,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    protectMode == ProtectMode.protect
-                        ? '保护模式: ${protectTrigger.name}'
-                        : '正常',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // 30s 统计
-            Text('最近 30s:', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              children: [
-                _metricItem('样本', '${stats30s.sampleCount}'),
-                _metricItem('均值', '${stats30s.meanMs.toStringAsFixed(1)}ms'),
-                _metricItem('P50', '${stats30s.p50Ms}ms'),
-                _metricItem('P95', '${stats30s.p95Ms}ms'),
-                _metricItem('P99', '${stats30s.p99Ms}ms'),
-                _metricItem(
-                  '≤30ms',
-                  '${(stats30s.within30msRatio * 100).toStringAsFixed(1)}%',
-                  stats30s.within30msRatio > 0.9 ? Colors.green : Colors.orange,
-                ),
-                _metricItem('seek/min', '${stats30s.seekCount}'),
-                _metricItem('speed/min', '${stats30s.speedSetCount}'),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // 120s 统计
-            Text('最近 120s:', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              children: [
-                _metricItem('样本', '${stats120s.sampleCount}'),
-                _metricItem('均值', '${stats120s.meanMs.toStringAsFixed(1)}ms'),
-                _metricItem('P50', '${stats120s.p50Ms}ms'),
-                _metricItem('P95', '${stats120s.p95Ms}ms'),
-                _metricItem('P99', '${stats120s.p99Ms}ms'),
-                _metricItem(
-                  '≤30ms',
-                  '${(stats120s.within30msRatio * 100).toStringAsFixed(1)}%',
-                  stats120s.within30msRatio > 0.9
-                      ? Colors.green
-                      : Colors.orange,
-                ),
-                _metricItem('seek/min', '${stats120s.seekCount}'),
-                _metricItem('speed/min', '${stats120s.speedSetCount}'),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // Drop 统计
-            Text('Drop 统计:', style: TextStyle(fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              children: [
-                _metricItem('stale', '${dropStats.staleCount}'),
-                _metricItem('clockUnlocked', '${dropStats.clockUnlockedCount}'),
-                _metricItem('notReady', '${dropStats.notReadyCount}'),
-                _metricItem('总计', '${dropStats.total}'),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // 导出按钮
-            ElevatedButton.icon(
-              onPressed: () {
-                final json = _controller.metrics.exportSamplesJson();
-                Clipboard.setData(ClipboardData(text: json));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('已复制 120s 样本到剪贴板')),
-                );
-              },
-              icon: const Icon(Icons.copy),
-              label: const Text('导出 120s 样本'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _metricItem(String label, String value, [Color? color]) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: color,
-          ),
-        ),
-      ],
-    );
-  }
-
   /// 同步控制区块
   Widget _buildSyncControlSection() {
     return Card(
@@ -1491,6 +1561,22 @@ class _SyncLabPageState extends State<SyncLabPage> {
             const Text(
               '同步控制',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            // 说明文字
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.blue.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text(
+                '说明：控制 KeepSync 自动追帧功能。\n'
+                '• 开始同步：启动自动追帧，Client 会自动调整播放位置对齐 Host\n'
+                '• 停止同步：停止自动追帧，Client 不再自动调整\n'
+                '与播放控制不同：播放控制控制本地播放器，同步控制控制是否自动对齐。',
+                style: TextStyle(fontSize: 12),
+              ),
             ),
             const SizedBox(height: 12),
             Row(
@@ -1546,7 +1632,7 @@ class _SyncLabPageState extends State<SyncLabPage> {
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
-                children: [_buildPresetButton('iOS 默认(150/100)', 100, 150)],
+                children: [_buildPresetButton('iOS 默认(65/100)', 100, 65)],
               ),
               const SizedBox(height: 12),
             ],
@@ -1554,7 +1640,21 @@ class _SyncLabPageState extends State<SyncLabPage> {
             // 校准偏移滑条 + 精细调节
             Row(
               children: [
-                const Text('偏移: '),
+                Tooltip(
+                  message:
+                      '偏移：调整本机播放时间\n正值=让本机更晚播放（延迟）\n负值=让本机更早播放（提前）\n用于补偿音频输出延迟',
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('偏移: '),
+                      Icon(
+                        Icons.info_outline,
+                        size: 16,
+                        color: Colors.grey[600],
+                      ),
+                    ],
+                  ),
+                ),
                 // 减少 10ms
                 IconButton(
                   icon: const Icon(Icons.fast_rewind),
@@ -1654,7 +1754,20 @@ class _SyncLabPageState extends State<SyncLabPage> {
             // 延迟补偿滑条 + 精细调节
             Row(
               children: [
-                const Text('补偿: '),
+                Tooltip(
+                  message: '补偿：网络+音频输出延迟补偿\n用于补偿网络传输延迟和音频输出延迟\n让同步更加准确',
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('补偿: '),
+                      Icon(
+                        Icons.info_outline,
+                        size: 16,
+                        color: Colors.grey[600],
+                      ),
+                    ],
+                  ),
+                ),
                 // 减少 10ms
                 IconButton(
                   icon: const Icon(Icons.fast_rewind),
@@ -2142,6 +2255,10 @@ class _SyncLabPageState extends State<SyncLabPage> {
   // ========== 操作方法 ==========
 
   Future<void> _createRoom() async {
+    // 如果已经在房间中，不重复创建
+    if (_controller.role != SyncRole.none) {
+      return;
+    }
     final success = await _controller.createRoom(roomName: 'Test Room');
     if (mounted) {
       ScaffoldMessenger.of(
@@ -2165,19 +2282,17 @@ class _SyncLabPageState extends State<SyncLabPage> {
     }
   }
 
-  Future<void> _stopScanning() async {
-    await _controller.stopScanning();
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
   Future<void> _joinRoom(DiscoveredRoom room) async {
-    final success = await _controller.joinRoom(room);
+    // 加入房间前先停止扫描
+    await _controller.stopScanning();
+    final result = await _controller.joinRoom(room);
     if (mounted) {
+      final message = result == true
+          ? '已加入房间'
+          : (result == null ? '已在房间中' : '加入房间失败');
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(success ? '已加入房间' : '加入房间失败')));
+      ).showSnackBar(SnackBar(content: Text(message)));
       setState(() {});
     }
   }
@@ -2193,11 +2308,16 @@ class _SyncLabPageState extends State<SyncLabPage> {
       return;
     }
 
-    final success = await _controller.joinByIp(ip, port);
+    // 加入房间前先停止扫描
+    await _controller.stopScanning();
+    final result = await _controller.joinByIp(ip, port);
     if (mounted) {
+      final message = result == true
+          ? '已加入房间'
+          : (result == null ? '已在房间中' : '加入房间失败');
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(success ? '已加入房间' : '加入房间失败')));
+      ).showSnackBar(SnackBar(content: Text(message)));
       setState(() {});
     }
   }
@@ -2209,24 +2329,30 @@ class _SyncLabPageState extends State<SyncLabPage> {
     }
   }
 
-  /// 选择 MP3 文件（使用 file_picker）
-  Future<void> _selectMp3File() async {
+  /// 选择 MP3 文件（使用 file_picker，支持多选）
+  Future<void> _selectMp3File({bool allowMultiple = true}) async {
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['mp3'],
+        allowedExtensions: ['mp3', 'aac', 'm4a', 'wav'],
+        allowMultiple: allowMultiple,
       );
 
       if (result != null && result.files.isNotEmpty) {
-        final file = result.files.first;
-        if (file.path != null) {
-          final success = await _controller.selectMp3File(file.path!);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(success ? '已选择: ${file.name}' : '选择失败')),
-            );
-            setState(() {});
-          }
+        // 直接批量处理选中的文件
+        int successCount = 0;
+        for (final file in result.files) {
+          final success = await _processSelectedFile(file);
+          if (success) successCount++;
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('已添加 $successCount/${result.files.length} 个文件'),
+            ),
+          );
+          setState(() {});
         }
       }
     } catch (e) {
@@ -2238,13 +2364,282 @@ class _SyncLabPageState extends State<SyncLabPage> {
     }
   }
 
-  /// 使用 Demo 音频（assets 兜底）
-  Future<void> _useDemoAudio() async {
-    // TODO: 从 assets 复制 demo.mp3 到临时目录
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Demo 音频功能待实现（需要 assets/demo.mp3）')),
+  /// 处理单个选中的文件
+  Future<bool> _processSelectedFile(PlatformFile file) async {
+    String? filePath = file.path;
+
+    // Android: 处理 content:// URI，需要复制到缓存目录
+    if (filePath != null && filePath.startsWith('content://')) {
+      debugPrint('[SyncLab] Android content URI: $filePath');
+      filePath = await _copyContentUriToCache(filePath, file.name);
+      if (filePath == null) {
+        return false;
+      }
+    }
+
+    if (filePath != null) {
+      return await _controller.selectMp3File(filePath);
+    }
+    return false;
+  }
+
+  /// 将 Android content:// URI 文件复制到缓存目录
+  Future<String?> _copyContentUriToCache(
+    String contentUri,
+    String fileName,
+  ) async {
+    try {
+      // 使用 MethodChannel 读取 content:// URI
+      const channel = MethodChannel('com.example.sync_music/content_resolver');
+
+      final bytes = await channel.invokeMethod<Uint8List>('readContentUri', {
+        'uri': contentUri,
+      });
+
+      if (bytes == null) {
+        debugPrint('[SyncLab] Failed to read content URI: bytes is null');
+        return null;
+      }
+
+      // 保存到缓存目录
+      final cacheDir = await getApplicationCacheDirectory();
+      final localFile = File('${cacheDir.path}/$fileName');
+      await localFile.writeAsBytes(bytes);
+
+      debugPrint('[SyncLab] Copied content URI to: ${localFile.path}');
+      return localFile.path;
+    } catch (e) {
+      debugPrint('[SyncLab] Error copying content URI: $e');
+      return null;
+    }
+  }
+
+  /// 选择音乐文件夹（扫描 MP3 和 AAC 文件）
+  Future<void> _selectMusicFolder() async {
+    try {
+      // 请求存储权限
+      final status = await Permission.audio.request();
+      debugPrint('[SyncLab] 音频权限状态: $status');
+
+      if (!status.isGranted) {
+        // 尝试请求存储权限（Android 10 及以下）
+        final storageStatus = await Permission.storage.request();
+        debugPrint('[SyncLab] 存储权限状态: $storageStatus');
+
+        if (!storageStatus.isGranted && !status.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('需要存储权限才能读取音乐文件')));
+          }
+          // 打开设置页面
+          await openAppSettings();
+          return;
+        }
+      }
+
+      final folderPath = await FilePicker.platform.getDirectoryPath();
+      if (folderPath == null) return;
+
+      debugPrint('[SyncLab] 选择的文件夹路径: $folderPath');
+
+      // Android: 处理 content:// URI 文件夹
+      if (folderPath.startsWith('content://')) {
+        debugPrint('[SyncLab] Android content URI 文件夹: $folderPath');
+        await _selectMusicFromContentTree(folderPath);
+        return;
+      }
+
+      // 尝试读取文件夹
+      final dir = Directory(folderPath);
+
+      // 检查文件夹是否存在
+      bool exists = false;
+      bool hasAccess = false;
+      try {
+        exists = await dir.exists();
+        debugPrint('[SyncLab] 文件夹存在: $exists');
+
+        // 尝试列出文件来验证访问权限
+        if (exists) {
+          try {
+            await for (final _ in dir.list().take(1)) {
+              hasAccess = true;
+              break;
+            }
+            if (!hasAccess) {
+              // 空文件夹也算有访问权限
+              hasAccess = true;
+            }
+          } catch (e) {
+            debugPrint('[SyncLab] 无访问权限: $e');
+            hasAccess = false;
+          }
+        }
+      } catch (e) {
+        debugPrint('[SyncLab] 检查文件夹存在失败: $e');
+        exists = false;
+        hasAccess = false;
+      }
+
+      // 如果无法访问真实路径，自动切换到 SAF 文件选择
+      if (!exists || !hasAccess) {
+        debugPrint('[SyncLab] 无法访问真实路径，切换到 SAF 文件选择');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('正在使用系统文件选择器...'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        // 自动切换到 SAF 文件选择
+        await _selectMp3File();
+        return;
+      }
+
+      // 扫描 MP3 和 AAC 文件（支持中文路径）
+      final musicFiles = <FileSystemEntity>[];
+      try {
+        await for (final entity in dir.list(recursive: true)) {
+          if (entity is File) {
+            final ext = entity.path.toLowerCase();
+            if (ext.endsWith('.mp3') ||
+                ext.endsWith('.aac') ||
+                ext.endsWith('.m4a') ||
+                ext.endsWith('.wav')) {
+              musicFiles.add(entity);
+              debugPrint('[SyncLab] 找到音乐文件: ${entity.path}');
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[SyncLab] 扫描文件夹失败: $e');
+        // 权限问题，提示用户使用其他方式
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('无法扫描该文件夹: $e\n请使用"选择单个文件"按钮'),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
+      debugPrint('[SyncLab] 找到 ${musicFiles.length} 个音乐文件');
+
+      if (musicFiles.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('未找到 MP3 或 AAC 文件')));
+        }
+        return;
+      }
+
+      // 显示文件列表供选择
+      if (!mounted) return;
+      final selectedFile = await showDialog<File>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('选择音乐文件'),
+          children: musicFiles.map((f) {
+            final file = f as File;
+            final fileName = file.path.split(Platform.pathSeparator).last;
+            return SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, file),
+              child: Text(fileName),
+            );
+          }).toList(),
+        ),
       );
+
+      if (selectedFile != null && mounted) {
+        final success = await _controller.selectMp3File(selectedFile.path);
+        if (mounted) {
+          final fileName = selectedFile.path.split(Platform.pathSeparator).last;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(success ? '已选择: $fileName' : '选择失败')),
+          );
+          setState(() {});
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('选择文件夹失败: $e')));
+      }
+    }
+  }
+
+  /// 从 Android content tree URI 选择音乐文件
+  Future<void> _selectMusicFromContentTree(String treeUri) async {
+    try {
+      // 使用 MethodChannel 列出文件夹中的音乐文件
+      const channel = MethodChannel('com.example.sync_music/content_resolver');
+
+      final files = await channel.invokeMethod<List<dynamic>>(
+        'listContentTree',
+        {'treeUri': treeUri},
+      );
+
+      if (files == null || files.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('未找到音乐文件')));
+        }
+        return;
+      }
+
+      // 显示文件列表供选择
+      if (!mounted) return;
+      final selectedFileInfo = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('选择音乐文件'),
+          children: files.map((f) {
+            final fileMap = Map<String, dynamic>.from(f as Map);
+            final fileName = fileMap['name'] as String? ?? '未知文件';
+            return SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, fileMap),
+              child: Text(fileName),
+            );
+          }).toList(),
+        ),
+      );
+
+      if (selectedFileInfo != null && mounted) {
+        final fileUri = selectedFileInfo['uri'] as String;
+        final fileName = selectedFileInfo['name'] as String;
+
+        // 复制到缓存目录
+        final localPath = await _copyContentUriToCache(fileUri, fileName);
+        if (localPath != null) {
+          final success = await _controller.selectMp3File(localPath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(success ? '已选择: $fileName' : '选择失败')),
+            );
+            setState(() {});
+          }
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('无法读取文件')));
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[SyncLab] Error listing content tree: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('读取文件夹失败: $e')));
+      }
     }
   }
 
@@ -2267,31 +2662,6 @@ class _SyncLabPageState extends State<SyncLabPage> {
     }
   }
 
-  void _play() async {
-    final success = await _controller.play();
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(success ? '正在播放' : '播放失败')));
-    setState(() {});
-  }
-
-  void _pause() async {
-    await _controller.pause();
-    if (mounted) setState(() {});
-  }
-
-  void _seek() async {
-    // seek +500ms（模拟偏移）
-    await _controller.seek(500);
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已跳转 +500ms（模拟偏移）')));
-      setState(() {});
-    }
-  }
-
   void _startSync() {
     _controller.startPlaybackSync();
     if (mounted) {
@@ -2302,16 +2672,6 @@ class _SyncLabPageState extends State<SyncLabPage> {
   void _stopSync() {
     _controller.stopPlaybackSync();
     if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _disconnect() async {
-    await _controller.disconnect();
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已断开连接')));
       setState(() {});
     }
   }

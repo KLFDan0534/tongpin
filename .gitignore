@@ -1,0 +1,27 @@
+# https://dart.dev/guides/libraries/private-files
+# Created by `dart pub`
+.dart_tool/
+
+.gitignore
+
+# macOS
+.DS_Store
+._.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+*.temp
+.cache/
+
+# Build artifacts
+*.apk
+*.aab
+*.ipa
+*.dSYM.zip

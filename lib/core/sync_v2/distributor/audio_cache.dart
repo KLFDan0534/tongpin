@@ -131,11 +131,19 @@ class AudioCache {
     final tracks = <CachedTrack>[];
 
     for (final file in files) {
-      if (file is File && file.path.endsWith('.mp3')) {
+      final ext = file.path.toLowerCase();
+      if (file is File &&
+          (ext.endsWith('.mp3') ||
+              ext.endsWith('.aac') ||
+              ext.endsWith('.m4a') ||
+              ext.endsWith('.wav'))) {
         final stat = await file.stat();
-        final fileName = file.path.split('/').last;
-        // 从文件名提取 trackId（格式: trackId.mp3）
-        final trackId = fileName.replaceAll('.mp3', '');
+        final fileName = file.path.split(Platform.pathSeparator).last;
+        // 从文件名提取 trackId（格式: trackId.extension）
+        final trackId = fileName.replaceAll(
+          RegExp(r'\.(mp3|aac|m4a|wav)$'),
+          '',
+        );
         tracks.add(
           CachedTrack(
             trackId: trackId,

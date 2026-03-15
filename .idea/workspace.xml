@@ -6,11 +6,33 @@
   <component name="ChangeListManager">
     <list default="true" id="7dd1f6eb-f417-4e2f-a75a-89b122110420" name="更改" comment="xm">
       <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/assets/audio/咏春-七朵组合.aac" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/assets/audio/扬州慢-七朵组合.mp3" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/assets/audio/玉生烟-七朵组合.aac" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/assets/audio/青蛇-七朵组合.aac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.flutter-plugins-dependencies" beforeDir="false" afterPath="$PROJECT_DIR$/.flutter-plugins-dependencies" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/libraries/Dart_Packages.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/libraries/Dart_Packages.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/libraries/Flutter_Plugins.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/libraries/Flutter_Plugins.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/diagnostics/sync_log.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/diagnostics/sync_log.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.windsurf/rules/projrct.md" beforeDir="false" afterPath="$PROJECT_DIR$/.windsurf/rules/projrct.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/android/app/src/main/kotlin/com/example/sync_music/MainActivity.kt" beforeDir="false" afterPath="$PROJECT_DIR$/android/app/src/main/kotlin/com/example/sync_music/MainActivity.kt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/android/sync_music_android.iml" beforeDir="false" afterPath="$PROJECT_DIR$/android/sync_music_android.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ios/Runner/Info.plist" beforeDir="false" afterPath="$PROJECT_DIR$/ios/Runner/Info.plist" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/calibration/calibration_service.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/calibration/calibration_service.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/distributor/audio_cache.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/distributor/audio_cache.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/distributor/audio_distributor.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/distributor/audio_distributor.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/distributor/http_file_server.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/distributor/http_file_server.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/distributor/track_meta.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/distributor/track_meta.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/playback_sync/keep_sync_controller.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/playback_sync/keep_sync_controller.dart" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/playback_sync/sync_controller.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/playback_sync/sync_controller.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/transport/protocol.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/transport/protocol.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/core/sync_v2/transport/websocket_transport.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/core/sync_v2/transport/websocket_transport.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/lib/main.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/main.dart" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/lib/ui/pages/sync_lab_page.dart" beforeDir="false" afterPath="$PROJECT_DIR$/lib/ui/pages/sync_lab_page.dart" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pubspec.lock" beforeDir="false" afterPath="$PROJECT_DIR$/pubspec.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pubspec.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/pubspec.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -50,17 +72,25 @@
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
     &quot;io.flutter.reload.alreadyRun&quot;: &quot;true&quot;,
     &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;D:/code/ideaProject/flutter/sync_music&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/code/ideaProject/flutter/sync_music/assets/audio&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;project.structure.last.edited&quot;: &quot;项目&quot;,
+    &quot;project.structure.proportion&quot;: &quot;0.0&quot;,
+    &quot;project.structure.side.proportion&quot;: &quot;0.0&quot;,
     &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
     &quot;show.migrate.to.gradle.popup&quot;: &quot;false&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="D:\code\ideaProject\flutter\sync_music\assets\audio" />
+    </key>
+  </component>
   <component name="RunManager" selected="Flutter.main.dart">
     <configuration name="sync_music.dart" type="DartCommandLineRunConfigurationType" factoryName="Dart Command Line Application">
       <option name="filePath" value="$PROJECT_DIR$/bin/sync_music.dart" />
@@ -100,7 +130,15 @@
       <workItem from="1771950744236" duration="23000" />
       <workItem from="1771950768843" duration="22000" />
       <workItem from="1771950834413" duration="4355000" />
-      <workItem from="1771996584714" duration="963000" />
+      <workItem from="1771996584714" duration="2978000" />
+      <workItem from="1773415218597" duration="369000" />
+      <workItem from="1773415706479" duration="4023000" />
+      <workItem from="1773451058322" duration="102000" />
+      <workItem from="1773452780719" duration="113000" />
+      <workItem from="1773478060080" duration="21973000" />
+      <workItem from="1773543249722" duration="599000" />
+      <workItem from="1773546265077" duration="3343000" />
+      <workItem from="1773569407560" duration="7138000" />
     </task>
     <task id="LOCAL-00001" summary="xm">
       <option name="closed" value="true" />
@@ -142,7 +180,15 @@
       <option name="project" value="LOCAL" />
       <updated>1771954297709</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="xm">
+      <option name="closed" value="true" />
+      <created>1772000266928</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1772000266928</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

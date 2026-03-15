@@ -29,6 +29,9 @@ class WebSocketTransport implements Transport {
   // WebSocket 服务器（Host 模式）
   HttpServer? _httpServer;
 
+  // 客户端 IP 地址映射（Host 模式）
+  final Map<String, String> _peerIpAddresses = {}; // peerId -> clientIp
+
   // 重连相关
   Timer? _reconnectTimer;
   String? _reconnectHost;
@@ -65,6 +68,19 @@ class WebSocketTransport implements Transport {
 
   /// 获取日志流（供 UI 节流监听）
   Stream<String> get logStream => _logController.stream;
+
+  /// 获取服务器绑定的地址（Host 模式）
+  String? get serverAddress {
+    if (_httpServer == null) return null;
+    return _httpServer!.address.address;
+  }
+
+  /// 获取已连接客户端的 IP 地址（Host 模式）
+  /// 返回第一个客户端的 IP，用于确定使用哪个网络接口
+  String? getFirstClientIp() {
+    if (_peerIpAddresses.isEmpty) return null;
+    return _peerIpAddresses.values.first;
+  }
 
   void _updateState(TransportState newState) {
     if (_state != newState) {
@@ -327,9 +343,18 @@ class WebSocketTransport implements Transport {
       final socket = await WebSocketTransformer.upgrade(request);
       final peerId = 'peer_${DateTime.now().millisecondsSinceEpoch}';
 
+      // 捕获客户端 IP 地址
+      final clientIp = request.connectionInfo?.remoteAddress.address;
+      if (clientIp != null) {
+        _peerIpAddresses[peerId] = clientIp;
+        _addLog('Peer connected: $peerId from $clientIp');
+        SyncLog.i('Peer connected: $peerId from $clientIp', role: 'host');
+      } else {
+        _addLog('Peer connected: $peerId (unknown IP)');
+        SyncLog.i('Peer connected: $peerId', role: 'host');
+      }
+
       _connectedPeers[peerId] = socket;
-      _addLog('Peer connected: $peerId');
-      SyncLog.i('Peer connected: $peerId', role: 'host');
 
       socket.listen(
         (data) => _onHostMessage(data, peerId),

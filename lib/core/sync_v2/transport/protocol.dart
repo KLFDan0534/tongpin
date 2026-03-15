@@ -26,6 +26,7 @@ class SyncProtocol {
   static const String audioSource = 'audio_source';
   static const String audioSourceReady = 'audio_source_ready';
   static const String trackAnnounce = 'track_announce';
+  static const String nextTrackAnnounce = 'next_track_announce';
   static const String clientReady = 'client_ready';
   static const String clientReadyError = 'client_ready_error';
 
@@ -39,6 +40,7 @@ class SyncProtocol {
   // 播放控制
   static const String playCommand = 'play_command';
   static const String pauseCommand = 'pause_command';
+  static const String resumeCommand = 'resume_command';
   static const String seekCommand = 'seek_command';
   static const String playbackState = 'playback_state';
 
@@ -386,6 +388,14 @@ SyncMessage? parseMessage(Map<String, dynamic> json) {
         return ClientStartReportMessage.fromJson(json);
       case SyncProtocol.hostState:
         return HostStateMessage.fromJson(json);
+      case SyncProtocol.pauseCommand:
+        return PauseCommandMessage.fromJson(json);
+      case SyncProtocol.resumeCommand:
+        return ResumeCommandMessage.fromJson(json);
+      case SyncProtocol.nextTrackAnnounce:
+        return NextTrackAnnounceMessage.fromJson(json);
+      case SyncProtocol.seekCommand:
+        return SeekCommandMessage.fromJson(json);
       default:
         return null;
     }
@@ -653,6 +663,162 @@ class HostStateMessage implements SyncMessage {
       sampledAtRoomTimeMs: json['sampledAtRoomTimeMs'] as int? ?? 0,
       epoch: json['epoch'] as int? ?? 0,
       seq: json['seq'] as int? ?? 0,
+    );
+  }
+}
+
+/// PauseCommand 消息（Host → All Clients）
+/// 广播暂停指令
+class PauseCommandMessage implements SyncMessage {
+  @override
+  final String type = SyncProtocol.pauseCommand;
+  final String roomId;
+  final int epoch;
+  final int pauseAtRoomTimeMs; // 暂停时的房间时间
+
+  PauseCommandMessage({
+    required this.roomId,
+    required this.epoch,
+    required this.pauseAtRoomTimeMs,
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'roomId': roomId,
+    'epoch': epoch,
+    'pauseAtRoomTimeMs': pauseAtRoomTimeMs,
+  };
+
+  factory PauseCommandMessage.fromJson(Map<String, dynamic> json) {
+    return PauseCommandMessage(
+      roomId: json['roomId'] as String? ?? '',
+      epoch: json['epoch'] as int? ?? 0,
+      pauseAtRoomTimeMs: json['pauseAtRoomTimeMs'] as int? ?? 0,
+    );
+  }
+}
+
+/// ResumeCommand 消息（Host → All Clients）
+/// 广播恢复播放指令
+class ResumeCommandMessage implements SyncMessage {
+  @override
+  final String type = SyncProtocol.resumeCommand;
+  final String roomId;
+  final int epoch;
+  final int resumeAtRoomTimeMs; // 恢复播放时的房间时间
+  final int resumePosMs; // 恢复播放时的播放位置
+
+  ResumeCommandMessage({
+    required this.roomId,
+    required this.epoch,
+    required this.resumeAtRoomTimeMs,
+    this.resumePosMs = 0,
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'roomId': roomId,
+    'epoch': epoch,
+    'resumeAtRoomTimeMs': resumeAtRoomTimeMs,
+    'resumePosMs': resumePosMs,
+  };
+
+  factory ResumeCommandMessage.fromJson(Map<String, dynamic> json) {
+    return ResumeCommandMessage(
+      roomId: json['roomId'] as String? ?? '',
+      epoch: json['epoch'] as int? ?? 0,
+      resumeAtRoomTimeMs: json['resumeAtRoomTimeMs'] as int? ?? 0,
+      resumePosMs: json['resumePosMs'] as int? ?? 0,
+    );
+  }
+}
+
+/// NextTrackAnnounce 消息（Host → All Clients）
+/// 广播下一首曲目预缓存公告
+class NextTrackAnnounceMessage implements SyncMessage {
+  @override
+  final String type = SyncProtocol.nextTrackAnnounce;
+  final String roomId;
+  final String hostPeerId;
+  final String trackId;
+  final String url;
+  final String fileHash;
+  final int sizeBytes;
+  final int durationMs;
+  final String? fileName;
+
+  NextTrackAnnounceMessage({
+    required this.roomId,
+    required this.hostPeerId,
+    required this.trackId,
+    required this.url,
+    required this.fileHash,
+    required this.sizeBytes,
+    required this.durationMs,
+    this.fileName,
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'roomId': roomId,
+    'hostPeerId': hostPeerId,
+    'trackId': trackId,
+    'url': url,
+    'fileHash': fileHash,
+    'sizeBytes': sizeBytes,
+    'durationMs': durationMs,
+    'fileName': fileName,
+  };
+
+  factory NextTrackAnnounceMessage.fromJson(Map<String, dynamic> json) {
+    return NextTrackAnnounceMessage(
+      roomId: json['roomId'] as String? ?? '',
+      hostPeerId: json['hostPeerId'] as String? ?? '',
+      trackId: json['trackId'] as String? ?? '',
+      url: json['url'] as String? ?? '',
+      fileHash: json['fileHash'] as String? ?? '',
+      sizeBytes: json['sizeBytes'] as int? ?? 0,
+      durationMs: json['durationMs'] as int? ?? 0,
+      fileName: json['fileName'] as String?,
+    );
+  }
+}
+
+/// SeekCommand 消息（Host → All Clients）
+/// 广播进度跳转指令
+class SeekCommandMessage implements SyncMessage {
+  @override
+  final String type = SyncProtocol.seekCommand;
+  final String roomId;
+  final int epoch;
+  final int seekPosMs; // 跳转到的播放位置
+  final int seekAtRoomTimeMs; // 跳转时的房间时间
+
+  SeekCommandMessage({
+    required this.roomId,
+    required this.epoch,
+    required this.seekPosMs,
+    required this.seekAtRoomTimeMs,
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'roomId': roomId,
+    'epoch': epoch,
+    'seekPosMs': seekPosMs,
+    'seekAtRoomTimeMs': seekAtRoomTimeMs,
+  };
+
+  factory SeekCommandMessage.fromJson(Map<String, dynamic> json) {
+    return SeekCommandMessage(
+      roomId: json['roomId'] as String? ?? '',
+      epoch: json['epoch'] as int? ?? 0,
+      seekPosMs: json['seekPosMs'] as int? ?? 0,
+      seekAtRoomTimeMs: json['seekAtRoomTimeMs'] as int? ?? 0,
     );
   }
 }

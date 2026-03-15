@@ -18,6 +18,9 @@ class HttpFileServer {
   // 当前服务的曲目
   TrackMeta? _currentTrack;
 
+  // 下一首预缓存曲目
+  TrackMeta? _nextTrack;
+
   // 服务端口
   int _port = 8787;
   static const int kDefaultPort = 8787;
@@ -42,6 +45,9 @@ class HttpFileServer {
 
   /// 当前曲目
   TrackMeta? get currentTrack => _currentTrack;
+
+  /// 下一首曲目
+  TrackMeta? get nextTrack => _nextTrack;
 
   /// 获取本机局域网 IP（公开）
   String get localIp => _localIp ?? '';
@@ -97,8 +103,34 @@ class HttpFileServer {
     return url;
   }
 
+  /// 获取下一首曲目的服务 URL
+  String get nextTrackUrl {
+    if (!_isRunning || _nextTrack == null) {
+      return '';
+    }
+    final ip = _localIp;
+    if (ip == null) {
+      return '';
+    }
+    return 'http://$ip:$_port/track/${_nextTrack!.trackId}';
+  }
+
+  /// 设置下一首预缓存曲目
+  void setNextTrack(TrackMeta? track) {
+    _nextTrack = track;
+    if (track != null) {
+      SyncLog.i('[HttpFileServer] 设置下一首预缓存曲目: ${track.trackId}', role: 'host');
+    } else {
+      SyncLog.i('[HttpFileServer] 清除下一首预缓存曲目', role: 'host');
+    }
+  }
+
   /// 启动服务器
-  Future<bool> start({int? port, required TrackMeta track}) async {
+  Future<bool> start({
+    int? port,
+    required TrackMeta track,
+    String? preferredIp,
+  }) async {
     if (_isRunning) {
       SyncLog.w('[HttpFileServer] Already running, stopping first');
       await stop();
@@ -108,8 +140,13 @@ class HttpFileServer {
     _currentTrack = track;
 
     try {
-      // 获取本机局域网 IP
-      await _getLocalIp();
+      // 获取本机局域网 IP（优先使用指定的 IP）
+      if (preferredIp != null && preferredIp.isNotEmpty) {
+        _localIp = preferredIp;
+        SyncLog.i('[HttpFileServer] Using preferred IP: $_localIp');
+      } else {
+        await _getLocalIp();
+      }
 
       // 绑定到所有网络接口
       _server = await HttpServer.bind(InternetAddress.anyIPv4, _port);
@@ -184,17 +221,25 @@ class HttpFileServer {
 
   /// 提供曲目文件
   Future<void> _serveTrack(HttpRequest request, String trackId) async {
-    if (_currentTrack == null || _currentTrack!.trackId != trackId) {
+    // 查找曲目：先查当前曲目，再查下一首曲目
+    TrackMeta? track;
+    if (_currentTrack != null && _currentTrack!.trackId == trackId) {
+      track = _currentTrack;
+    } else if (_nextTrack != null && _nextTrack!.trackId == trackId) {
+      track = _nextTrack;
+    }
+
+    if (track == null) {
       SyncLog.w('[HttpFileServer] Track not found: $trackId', role: 'host');
       request.response.statusCode = HttpStatus.notFound;
       await request.response.close();
       return;
     }
 
-    final file = File(_currentTrack!.localPath);
+    final file = File(track.localPath);
     if (!await file.exists()) {
       SyncLog.w(
-        '[HttpFileServer] File not found: ${_currentTrack!.localPath}',
+        '[HttpFileServer] File not found: ${track.localPath}',
         role: 'host',
       );
       request.response.statusCode = HttpStatus.notFound;
@@ -202,11 +247,35 @@ class HttpFileServer {
       return;
     }
 
+    // 根据文件扩展名设置 Content-Type
+    final filePath = track.localPath.toLowerCase();
+    ContentType contentType;
+    if (filePath.endsWith('.mp3')) {
+      contentType = ContentType('audio', 'mpeg');
+    } else if (filePath.endsWith('.aac')) {
+      contentType = ContentType('audio', 'aac');
+    } else if (filePath.endsWith('.m4a')) {
+      contentType = ContentType('audio', 'mp4');
+    } else if (filePath.endsWith('.wav')) {
+      contentType = ContentType('audio', 'wav');
+    } else {
+      contentType = ContentType('audio', 'mpeg'); // 默认
+    }
+
     // 设置响应头
     request.response.statusCode = HttpStatus.ok;
-    request.response.headers.contentType = ContentType('audio', 'mpeg');
+    request.response.headers.contentType = contentType;
     request.response.headers.contentLength = await file.length();
     request.response.headers.set('Access-Control-Allow-Origin', '*');
+
+    // 设置中文文件名支持
+    final fileName = track.fileName ?? 'track.mp3';
+    // RFC 5987 编码支持中文文件名
+    final encodedFileName = Uri.encodeComponent(fileName);
+    request.response.headers.set(
+      'Content-Disposition',
+      "attachment; filename*=UTF-8''$encodedFileName",
+    );
 
     // 支持 Range 请求（可选，V1 先不做）
     final range = request.headers.value('range');

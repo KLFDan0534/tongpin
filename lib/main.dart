@@ -1,64 +1,29 @@
 import 'package:flutter/material.dart';
+import 'ui/theme/app_theme.dart';
+import 'ui/pages/main_page.dart';
+import 'core/sync_v2/playback_sync/sync_controller.dart';
 
-import 'ui/pages/sync_lab_page.dart';
-
-void main() {
-  runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // 初始化 SyncV2Controller (必须在使用前调用)
+  await SyncV2Controller().init();
+  // 加载持久化的播放列表
+  await SyncV2Controller().loadPersistedPlaylist();
+  runApp(const SyncTuneApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class SyncTuneApp extends StatelessWidget {
+  const SyncTuneApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Sync Music',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
-      home: const HomePage(),
-    );
-  }
-}
-
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Sync Music'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              'Sync Music',
-              style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              '无后端、近距离、多设备同步播放',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
-            ),
-            const SizedBox(height: 32),
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const SyncLabPage()),
-                );
-              },
-              icon: const Icon(Icons.science),
-              label: const Text('进入 Sync Lab'),
-            ),
-          ],
-        ),
-      ),
+      title: '同频 SyncTune',
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.lightTheme,
+      darkTheme: AppTheme.darkTheme,
+      themeMode: ThemeMode.dark, // 默认使用深色主题
+      home: const MainPage(),
     );
   }
 }

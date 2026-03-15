@@ -17,6 +17,9 @@ class MainActivity : FlutterActivity() {
     // 注册 mDNS 服务
     MdnsService.getInstance(context).setupChannel(flutterEngine.dartExecutor.binaryMessenger)
     
+    // 注册 ContentResolver 处理器（用于读取 content:// URI）
+    ContentResolverHandler.register(context, flutterEngine.dartExecutor.binaryMessenger)
+    
     // 获取 WiFi 多播锁
     acquireMulticastLock()
   }

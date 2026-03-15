@@ -23,11 +23,24 @@ import '../distributor/track_meta.dart';
 import '../distributor/http_file_server.dart';
 import '../utils/background_executor.dart';
 import '../future_start/future_start_controller.dart';
+import '../../services/playlist_persistence.dart';
 import 'playback_synchronizer.dart';
 import 'keep_sync_controller.dart';
 
 /// 同步角色
 enum SyncRole { none, host, client }
+
+/// 播放模式
+enum PlayMode {
+  /// 列表循环
+  loop,
+
+  /// 单曲循环
+  single,
+
+  /// 随机播放
+  shuffle,
+}
 
 Future<bool> _writeTextFileIsolate(Map<String, String> args) async {
   final path = args['path'];
@@ -78,6 +91,7 @@ class SyncV2Controller {
   late final KeepSyncController _keepSync;
   late final SyncMetricsCollector _metrics;
   late final CalibrationService _calibration;
+  final PlaylistPersistence _persistence = PlaylistPersistence();
 
   // 当前角色
   SyncRole _role = SyncRole.none;
@@ -87,6 +101,17 @@ class SyncV2Controller {
   // 曲目状态
   TrackState _trackState = const TrackState();
   final _trackStateController = StreamController<TrackState>.broadcast();
+
+  // 播放列表
+  List<TrackMeta> _playlist = [];
+  int _currentIndex = -1; // 当前播放索引，-1 表示无曲目
+  PlayMode _playMode = PlayMode.loop; // 播放模式，默认列表循环
+  List<int> _shuffleOrder = []; // 随机播放顺序
+
+  // 下一首预缓存曲目（Client 端）
+  TrackMeta? _nextTrackMeta;
+  String? _nextTrackLocalPath;
+  bool _nextTrackDownloading = false;
 
   // 下载进度
   // ignore: unused_field
@@ -114,6 +139,7 @@ class SyncV2Controller {
 
   // Host 播放器（播放本地 MP3）
   AudioPlayer? _hostPlayer;
+  StreamSubscription<PlayerState>? _hostPlayerStateSub;
 
   // FutureStart epoch 管理
   int _epoch = 0;
@@ -199,6 +225,65 @@ class SyncV2Controller {
 
   /// 连接状态流
   Stream<TransportState> get connectionStateStream => _transport.stateStream;
+
+  /// 播放列表
+  List<TrackMeta> get playlist => List.unmodifiable(_playlist);
+
+  /// 当前播放索引
+  int get currentIndex => _currentIndex;
+
+  /// 当前曲目索引（用于 UI 显示）
+  int get playlistIndex => _currentIndex >= 0 ? _currentIndex + 1 : 0;
+
+  /// 播放模式
+  PlayMode get playMode => _playMode;
+
+  /// 设置播放模式
+  void setPlayMode(PlayMode mode) {
+    _playMode = mode;
+    if (mode == PlayMode.shuffle) {
+      _generateShuffleOrder();
+    }
+    _updateState();
+  }
+
+  /// 切换到下一个播放模式
+  PlayMode cyclePlayMode() {
+    switch (_playMode) {
+      case PlayMode.loop:
+        _playMode = PlayMode.single;
+        break;
+      case PlayMode.single:
+        _playMode = PlayMode.shuffle;
+        _generateShuffleOrder();
+        break;
+      case PlayMode.shuffle:
+        _playMode = PlayMode.loop;
+        break;
+    }
+    _updateState();
+    return _playMode;
+  }
+
+  /// 生成随机播放顺序
+  void _generateShuffleOrder() {
+    _shuffleOrder = List.generate(_playlist.length, (i) => i);
+    _shuffleOrder.shuffle();
+    // 确保当前播放的歌曲在随机列表的第一个
+    if (_currentIndex >= 0 && _currentIndex < _shuffleOrder.length) {
+      _shuffleOrder.remove(_currentIndex);
+      _shuffleOrder.insert(0, _currentIndex);
+    }
+  }
+
+  /// 播放列表总数
+  int get playlistCount => _playlist.length;
+
+  /// 是否有上一首
+  bool get hasPreviousTrack => _currentIndex > 0;
+
+  /// 是否有下一首（循环播放时总是有下一首）
+  bool get hasNextTrack => _playlist.isNotEmpty && _currentIndex >= 0;
 
   /// 已连接的 peer 数量
   int get peerCount => _transport.connectedPeers.length;
@@ -406,9 +491,25 @@ class SyncV2Controller {
     if (state == TransportState.hosting) {
       _throttledNotifier.updatePartial(connectionState: 'hosting');
     }
+
+    // 当 Client 连接断开时，自动清理状态，避免残留导致无法创建房间
+    if (state == TransportState.disconnected && _role == SyncRole.client) {
+      SyncLog.w('[SyncV2] Client 连接断开，自动清理状态', role: 'client');
+      _clockSync.stopSyncing();
+      _playbackSync.stopSync();
+      _role = SyncRole.none;
+      _roomId = null;
+      _peerId = null;
+      _updateState();
+      _throttledNotifier.updatePartial(
+        role: 'none',
+        state: 'disconnected',
+        connectionState: 'disconnected',
+      );
+    }
   }
 
-  void _onTransportMessage(TransportMessage message) {
+  void _onTransportMessage(TransportMessage message) async {
     final msg = parseMessage(message.payload);
     if (msg == null) return;
 
@@ -435,7 +536,31 @@ class SyncV2Controller {
             role: 'host',
           );
           if (_trackState.meta != null) {
-            _sendTrackAnnounceToPeer(joinMsg.peerId);
+            // 如果 HTTP 服务未运行但正在播放，启动服务
+            if (!_httpFileServer.isRunning &&
+                _hostPlayer != null &&
+                _hostPlayer!.playing) {
+              SyncLog.i('[Host] 正在播放但 HTTP 服务未运行，启动服务...', role: 'host');
+              final success = await startServingTrack();
+              SyncLog.i(
+                '[Host] HTTP 服务启动结果: $success, isRunning=${_httpFileServer.isRunning}',
+                role: 'host',
+              );
+            }
+            if (_httpFileServer.isRunning) {
+              SyncLog.i(
+                '[Host] 发送 track_announce 给新 Client: ${joinMsg.peerId}',
+                role: 'host',
+              );
+              _sendTrackAnnounceToPeer(joinMsg.peerId);
+            } else {
+              SyncLog.w('[Host] HTTP 服务未运行，无法发送 track_announce', role: 'host');
+            }
+          } else {
+            SyncLog.w(
+              '[Host] 无曲目信息，无法发送 track_announce: meta=${_trackState.meta}',
+              role: 'host',
+            );
           }
         }
         break;
@@ -460,6 +585,11 @@ class SyncV2Controller {
             '[Host] Client 就绪: ${ready.peerId}, 已缓存=${ready.cached}',
             role: 'host',
           );
+
+          // 如果 Host 正在播放，发送当前播放状态给新 Client
+          if (_hostPlayer != null && _hostPlayer!.playing) {
+            _sendCurrentStateToNewClient(ready.peerId);
+          }
         }
         break;
 
@@ -500,6 +630,38 @@ class SyncV2Controller {
           _onHostState(hostState);
         }
         break;
+
+      case SyncProtocol.pauseCommand:
+        // Client 收到暂停指令
+        if (_role == SyncRole.client) {
+          final pauseCmd = msg as PauseCommandMessage;
+          _onPauseCommand(pauseCmd);
+        }
+        break;
+
+      case SyncProtocol.resumeCommand:
+        // Client 收到恢复播放指令
+        if (_role == SyncRole.client) {
+          final resumeCmd = msg as ResumeCommandMessage;
+          _onResumeCommand(resumeCmd);
+        }
+        break;
+
+      case SyncProtocol.nextTrackAnnounce:
+        // Client 收到下一首预缓存公告
+        if (_role == SyncRole.client) {
+          final nextAnnounce = msg as NextTrackAnnounceMessage;
+          _onNextTrackAnnounce(nextAnnounce);
+        }
+        break;
+
+      case SyncProtocol.seekCommand:
+        // Client 收到进度跳转指令
+        if (_role == SyncRole.client) {
+          final seekCmd = msg as SeekCommandMessage;
+          _onSeekCommand(seekCmd);
+        }
+        break;
     }
   }
 
@@ -518,6 +680,51 @@ class SyncV2Controller {
         error: 'Invalid track URL',
       );
       _trackStateController.add(_trackState);
+      return;
+    }
+
+    // 检查是否是预缓存的下一首曲目
+    if (_nextTrackMeta?.trackId == announce.trackId &&
+        _nextTrackLocalPath != null) {
+      SyncLog.i(
+        '[Client] 使用预缓存的下一首: ${announce.trackId}, path=$_nextTrackLocalPath',
+        role: 'client',
+      );
+
+      // 使用预缓存的曲目
+      _trackState = TrackState(
+        status: TrackStatus.serving,
+        meta: TrackMeta(
+          trackId: announce.trackId,
+          localPath: _nextTrackLocalPath!,
+          fileName: announce.fileName,
+          sizeBytes: announce.sizeBytes,
+          durationMs: announce.durationMs,
+          fileHash: announce.fileHash,
+          createdAt: DateTime.now(),
+        ),
+      );
+      _trackStateController.add(_trackState);
+
+      // 发送 ready 消息
+      final readyMsg = ClientReadyMessage(
+        roomId: announce.roomId,
+        peerId: _peerId!,
+        trackId: announce.trackId,
+        cached: true,
+        localPath: _nextTrackLocalPath!,
+        prepareMs: 0,
+      );
+      _transport.send(
+        TransportMessage.create(readyMsg.type, readyMsg.toJson()),
+      );
+
+      // 清除预缓存状态
+      _nextTrackMeta = null;
+      _nextTrackLocalPath = null;
+
+      // 曲目就绪，检查是否需要追帧
+      _onTrackReadyForCatchUp();
       return;
     }
 
@@ -602,6 +809,7 @@ class SyncV2Controller {
       meta: TrackMeta(
         trackId: announce.trackId,
         localPath: '', // 还未下载
+        url: announce.url, // 保存下载地址用于重试
         fileName: announce.fileName,
         sizeBytes: announce.sizeBytes,
         durationMs: announce.durationMs,
@@ -696,12 +904,24 @@ class SyncV2Controller {
       role: 'client',
     );
 
+    // 重置追帧状态（切换歌曲时需要重新追帧）
+    _catchUpDoneEpoch = -1;
+    _hasHostStatePlaying = false;
+    _trackReadyForCatchUp = false;
+    SyncLog.i('[Client] 切换歌曲，重置追帧状态', role: 'client');
+
     // 检查曲目是否已缓存
     final trackId = startAt.trackId;
     final localPath = _trackState.meta?.localPath;
+    final currentTrackId = _trackState.meta?.trackId;
+
+    SyncLog.i(
+      '[Client] 曲目检查: 请求trackId=$trackId 当前trackId=$currentTrackId localPath=$localPath',
+      role: 'client',
+    );
 
     if (localPath == null || _trackState.meta?.trackId != trackId) {
-      SyncLog.e('[Client] start_at: 曲目未缓存', role: 'client');
+      SyncLog.e('[Client] start_at: 曲目未缓存，无法播放', role: 'client');
       _futureStartState = FutureStartState.failed;
       return;
     }
@@ -718,19 +938,20 @@ class SyncV2Controller {
         startPosMs: startAt.startPosMs,
       ),
       onPrepare: (params) async {
-        // 准备：播放器已预初始化，只需确认状态
+        // 准备：加载新曲目文件
         _futureStartState = FutureStartState.preparing;
 
         try {
-          // 播放器应该已经预初始化了
+          // 始终重新加载文件（切换歌曲时需要）
           if (_player == null) {
-            // 兜底：如果未初始化，快速初始化
             _player = AudioPlayer();
             final session = await AudioSession.instance;
             await session.configure(const AudioSessionConfiguration.music());
-            await _player!.setFilePath(localPath);
           }
-          // 如果已初始化，无需重新加载文件（已在 _preInitPlayer 中加载）
+
+          // 加载新曲目文件
+          await _player!.setFilePath(localPath);
+          SyncLog.i('[Client] 已加载曲目文件: $localPath', role: 'client');
 
           if (params.startPosMs > 0) {
             await _player!.seek(Duration(milliseconds: params.startPosMs));
@@ -764,38 +985,298 @@ class SyncV2Controller {
           startErrorMs: _startErrorMs,
         );
         _transport.send(TransportMessage.create(report.type, report.toJson()));
+
+        // 切换歌曲后标记状态，让后续 host_state 能通过 KeepSync 同步
+        _trackReadyForCatchUp = true;
+        _hasHostStatePlaying = true;
+        // 不设置 _catchUpDoneEpoch，让后续 host_state 能触发追帧同步到 Host 位置
+        SyncLog.i(
+          '[Client] 切换歌曲完成: epoch=${params.epoch} _hasHostStatePlaying=$_hasHostStatePlaying',
+          role: 'client',
+        );
+        SyncLog.i('[Client] 等待后续 host_state 进行追帧同步', role: 'client');
       },
     );
   }
 
   /// Client 收到 Host 状态广播
-  void _onHostState(HostStateMessage hostState) {
+  Future<void> _onHostState(HostStateMessage hostState) async {
     // 更新最新 Host 状态
     _latestHostState = hostState;
 
-    // 更新条件状态
+    // 更新条件状态（先保存旧值，再更新）
     final wasPlaying = _hasHostStatePlaying;
-    _hasHostStatePlaying = hostState.isPlaying;
+    // 注意：这里先不更新 _hasHostStatePlaying，等恢复播放逻辑处理完再更新
+
+    // 获取当前 Client 播放器状态
+    final clientPosMs = _player?.position.inMilliseconds ?? -1;
+    final clientPlaying = _player?.playing ?? false;
+    final clientTrackId = _trackState.meta?.trackId ?? 'null';
 
     SyncLog.i(
-      '[Client] 收到 host_state: isPlaying=${hostState.isPlaying} pos=${hostState.hostPosMs}ms epoch=${hostState.epoch}',
+      '[Client] 收到 host_state: isPlaying=${hostState.isPlaying} pos=${hostState.hostPosMs}ms epoch=${hostState.epoch} trackId=${hostState.trackId}',
+      role: 'client',
+    );
+    SyncLog.i(
+      '[Client] 当前状态: wasPlaying=$wasPlaying clientPos=$clientPosMs clientPlaying=$clientPlaying clientTrackId=$clientTrackId',
       role: 'client',
     );
 
-    // 从暂停恢复播放时，重置追帧 gate，允许重新追帧
-    if (!wasPlaying && hostState.isPlaying) {
-      _catchUpDoneEpoch = -1;
-      SyncLog.i('[CatchUp] 恢复播放，重置追帧 gate', role: 'client');
-      _maybeTriggerCatchUp();
+    // 从暂停恢复播放 或 新 Client 加入正在播放
+    // 或者 host 在播放但 client 播放器没有播放（异常恢复）
+    final shouldResume =
+        (!wasPlaying && hostState.isPlaying) ||
+        (hostState.isPlaying && !clientPlaying);
+
+    // 检查曲目是否匹配
+    final trackMismatch =
+        clientTrackId != hostState.trackId && hostState.trackId != 'null';
+
+    if (shouldResume) {
+      SyncLog.i(
+        '[Client] 检测到需要恢复播放: wasPlaying=$wasPlaying hostPlaying=${hostState.isPlaying} clientPlaying=$clientPlaying trackMismatch=$trackMismatch',
+        role: 'client',
+      );
+
+      // 如果曲目不匹配，不恢复播放，等待正确曲目下载
+      if (trackMismatch) {
+        SyncLog.i(
+          '[Client] 曲目不匹配，跳过恢复播放: clientTrackId=$clientTrackId hostTrackId=${hostState.trackId}',
+          role: 'client',
+        );
+        _hasHostStatePlaying = hostState.isPlaying;
+        _runKeepSync(hostState);
+        return;
+      }
+
+      // 标记当前 epoch 已追帧完成，避免 _performCatchUp 重新加载文件
+      _catchUpDoneEpoch = hostState.epoch;
+
+      final localPath = _trackState.meta?.localPath;
+      if (localPath == null || localPath.isEmpty) {
+        // 曲目还没下载完，跳过播放，等下载完成后会通过 _onTrackReadyForCatchUp 触发
+        SyncLog.i('[Client] 曲目未就绪，跳过自动播放', role: 'client');
+      } else if (_player != null && !_player!.playing) {
+        // 播放器已初始化，seek 到 Host 位置并播放
+        SyncLog.i(
+          '[Client] 播放器已存在但未播放，准备 seek 到 ${hostState.hostPosMs}ms',
+          role: 'client',
+        );
+        _player!.seek(Duration(milliseconds: hostState.hostPosMs));
+        SyncLog.i('[Client] seek 完成，准备播放', role: 'client');
+        await _player!.play();
+        SyncLog.i('[Client] 恢复播放完成', role: 'client');
+      } else if (_player == null) {
+        // 播放器未初始化，需要初始化并播放
+        SyncLog.i('[Client] 播放器未初始化，准备初始化并播放', role: 'client');
+        try {
+          _player = AudioPlayer();
+          final session = await AudioSession.instance;
+          await session.configure(const AudioSessionConfiguration.music());
+          await _player!.setFilePath(localPath);
+          _player!.seek(Duration(milliseconds: hostState.hostPosMs));
+          await _player!.play();
+          SyncLog.i(
+            '[Client] 已初始化播放器并播放: pos=${hostState.hostPosMs}',
+            role: 'client',
+          );
+        } catch (e) {
+          SyncLog.e('[Client] 初始化播放器失败', error: e);
+        }
+      }
     }
+
+    // 现在更新 _hasHostStatePlaying
+    _hasHostStatePlaying = hostState.isPlaying;
 
     // 执行 KeepSync 持续同步
     _runKeepSync(hostState);
   }
 
+  /// Client 收到暂停指令
+  void _onPauseCommand(PauseCommandMessage pauseCmd) {
+    SyncLog.i('[Client] 收到暂停指令: epoch=${pauseCmd.epoch}', role: 'client');
+
+    // 暂停本地播放器
+    _player?.pause();
+
+    // 更新状态（保持 futureStartState 为 started，以便恢复播放）
+    _hasHostStatePlaying = false;
+  }
+
+  /// Client 收到恢复播放指令
+  void _onResumeCommand(ResumeCommandMessage resumeCmd) {
+    SyncLog.i(
+      '[Client] 收到恢复播放指令: epoch=${resumeCmd.epoch}, pos=${resumeCmd.resumePosMs}',
+      role: 'client',
+    );
+
+    // 获取当前播放器状态
+    final playerExists = _player != null;
+    final playerPlaying = _player?.playing ?? false;
+    final playerPos = _player?.position.inMilliseconds ?? -1;
+
+    SyncLog.i(
+      '[Client] 播放器状态: exists=$playerExists playing=$playerPlaying pos=$playerPos',
+      role: 'client',
+    );
+
+    // 恢复本地播放器（从暂停位置继续）
+    if (_player != null && !_player!.playing) {
+      // 先 seek 到 Host 的播放位置
+      if (resumeCmd.resumePosMs > 0) {
+        SyncLog.i(
+          '[Client] 准备 seek 到位置: ${resumeCmd.resumePosMs}',
+          role: 'client',
+        );
+        _player!.seek(Duration(milliseconds: resumeCmd.resumePosMs));
+        SyncLog.i('[Client] seek 完成', role: 'client');
+      }
+      _player!.play();
+      SyncLog.i('[Client] 恢复播放完成', role: 'client');
+    } else if (_player != null && _player!.playing) {
+      SyncLog.w('[Client] 播放器已在播放中，跳过恢复', role: 'client');
+    } else {
+      SyncLog.e('[Client] 播放器不存在，无法恢复播放', role: 'client');
+    }
+
+    // 更新状态
+    _hasHostStatePlaying = true;
+    // 标记当前 epoch 已追帧完成，避免 host_state 触发追帧
+    _catchUpDoneEpoch = resumeCmd.epoch;
+    SyncLog.i(
+      '[Client] 恢复播放状态更新: _hasHostStatePlaying=$_hasHostStatePlaying _catchUpDoneEpoch=$_catchUpDoneEpoch',
+      role: 'client',
+    );
+  }
+
+  /// Client 收到进度跳转指令
+  void _onSeekCommand(SeekCommandMessage seekCmd) {
+    SyncLog.i(
+      '[Client] 收到进度跳转指令: epoch=${seekCmd.epoch}, pos=${seekCmd.seekPosMs}',
+      role: 'client',
+    );
+
+    // 获取当前播放器状态
+    final playerExists = _player != null;
+    final playerPlaying = _player?.playing ?? false;
+    final playerPos = _player?.position.inMilliseconds ?? -1;
+
+    SyncLog.i(
+      '[Client] 播放器状态: exists=$playerExists playing=$playerPlaying pos=$playerPos',
+      role: 'client',
+    );
+
+    // 跳转到指定位置
+    if (_player != null) {
+      _player!.seek(Duration(milliseconds: seekCmd.seekPosMs));
+      SyncLog.i('[Client] 已跳转到位置: ${seekCmd.seekPosMs}', role: 'client');
+    } else {
+      SyncLog.e('[Client] 播放器不存在，无法跳转', role: 'client');
+    }
+
+    // 标记当前 epoch 已追帧完成
+    _catchUpDoneEpoch = seekCmd.epoch;
+  }
+
+  /// Client 收到下一首预缓存公告
+  Future<void> _onNextTrackAnnounce(NextTrackAnnounceMessage announce) async {
+    SyncLog.i(
+      '[Client] 收到下一首预缓存公告: trackId=${announce.trackId}, url=${announce.url}',
+      role: 'client',
+    );
+
+    // 检查 URL 是否有效
+    if (announce.url.isEmpty) {
+      SyncLog.w('[Client] 下一首预缓存 URL 为空', role: 'client');
+      return;
+    }
+
+    // 检查是否已经在下载
+    if (_nextTrackDownloading) {
+      SyncLog.i('[Client] 下一首正在下载中，跳过', role: 'client');
+      return;
+    }
+
+    // 检查本地是否已有缓存
+    final cachedTracks = await _cache.getCachedTracks();
+    final existingCache = cachedTracks
+        .where(
+          (t) =>
+              t.trackId == announce.trackId ||
+              t.localPath.contains(announce.trackId),
+        )
+        .toList();
+
+    if (existingCache.isNotEmpty) {
+      // 已有缓存，直接记录
+      _nextTrackMeta = TrackMeta(
+        trackId: announce.trackId,
+        localPath: existingCache.first.localPath,
+        fileName: announce.fileName,
+        sizeBytes: announce.sizeBytes,
+        durationMs: announce.durationMs,
+        fileHash: announce.fileHash,
+        createdAt: DateTime.now(),
+      );
+      _nextTrackLocalPath = existingCache.first.localPath;
+      SyncLog.i(
+        '[Client] 下一首已缓存: ${announce.trackId}, path=$_nextTrackLocalPath',
+        role: 'client',
+      );
+      return;
+    }
+
+    // 开始后台下载
+    _nextTrackDownloading = true;
+    _nextTrackMeta = TrackMeta(
+      trackId: announce.trackId,
+      localPath: '', // 还未下载完成
+      fileName: announce.fileName,
+      sizeBytes: announce.sizeBytes,
+      durationMs: announce.durationMs,
+      fileHash: announce.fileHash,
+      createdAt: DateTime.now(),
+    );
+
+    SyncLog.i('[Client] 开始后台下载下一首: ${announce.trackId}', role: 'client');
+
+    try {
+      final result = await _cache.downloadAndCache(
+        url: announce.url,
+        trackId: announce.trackId,
+        expectedHash: announce.fileHash,
+        expectedSize: announce.sizeBytes,
+      );
+
+      if (result.success && result.localPath != null) {
+        _nextTrackLocalPath = result.localPath;
+        SyncLog.i(
+          '[Client] 下一首预缓存完成: ${announce.trackId}, path=$_nextTrackLocalPath',
+          role: 'client',
+        );
+      } else {
+        SyncLog.w(
+          '[Client] 下一首预缓存失败: ${announce.trackId}, error=${result.errorMessage}',
+          role: 'client',
+        );
+      }
+    } catch (e) {
+      SyncLog.e('[Client] 下一首预缓存异常: ${announce.trackId}', error: e);
+    } finally {
+      _nextTrackDownloading = false;
+    }
+  }
+
   /// 执行 KeepSync 持续同步
   void _runKeepSync(HostStateMessage hostState) {
-    if (_player == null || _trackState.meta == null) return;
+    if (_player == null || _trackState.meta == null) {
+      SyncLog.d(
+        '[KeepSync] 跳过: player=${_player != null} trackMeta=${_trackState.meta != null}',
+        role: 'client',
+      );
+      return;
+    }
 
     final roomNowMs = _clock.roomNowMs;
     final clientPosMs = _player!.position.inMilliseconds;
@@ -833,6 +1314,20 @@ class SyncV2Controller {
       jitterMs: _diagnostics.data.jitterMs,
       rttMs: _diagnostics.data.rttMs,
     );
+
+    // 详细决策日志
+    SyncLog.d(
+      '[KeepSync] 决策: action=${decision.action.name} delta=${decision.deltaMs}ms reason=${decision.reason ?? "无"}',
+      role: 'client',
+    );
+
+    // 如果 epoch 变化且偏差小，跳过本次处理（让下一次 host_state 再做决策）
+    if (decision.reason == 'epoch_changed') {
+      SyncLog.i('[KeepSync] epoch 变化且偏差小，跳过本次处理', role: 'client');
+      return;
+    }
+
+    // epoch_changed_seek 需要执行 seek 同步
 
     // 记录样本到指标收集器
     _metrics.record(
@@ -876,6 +1371,8 @@ class SyncV2Controller {
       keepSyncDroppedCount: _keepSync.droppedHostStateCount,
       keepSyncDroppedReason: _keepSync.lastDroppedReason,
       keepSyncReason: decision.reason,
+      // 实时更新延迟补偿值
+      latencyCompMs: _calibration.totalCompensationMs,
     );
 
     // 检查保护模式
@@ -944,28 +1441,41 @@ class SyncV2Controller {
 
   /// 尝试追帧（三重 gate）
   void _tryCatchUp() {
-    if (_latestHostState == null) return;
+    if (_latestHostState == null) {
+      SyncLog.d('[CatchUp] 跳过: 无 host_state', role: 'client');
+      return;
+    }
 
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final epoch = _latestHostState!.epoch;
 
+    SyncLog.i(
+      '[CatchUp] 尝试追帧: epoch=$epoch _catchUpDoneEpoch=$_catchUpDoneEpoch _catchUpInFlight=$_catchUpInFlight',
+      role: 'client',
+    );
+
     // Gate 1: 已在追帧中
     if (_catchUpInFlight) {
-      SyncLog.d('[CatchUp] Gate 阻止: 正在追帧', role: 'client');
+      SyncLog.i('[CatchUp] Gate1 阻止: 正在追帧', role: 'client');
       return;
     }
 
     // Gate 2: 同一 epoch 已追帧
     if (_catchUpDoneEpoch == epoch) {
-      SyncLog.d('[CatchUp] Gate 阻止: epoch $epoch 已追帧', role: 'client');
+      SyncLog.i('[CatchUp] Gate2 阻止: epoch $epoch 已追帧完成', role: 'client');
       return;
     }
 
     // Gate 3: 1.5 秒内已尝试过
     if (nowMs - _lastCatchUpAttemptAtMs < 1500) {
-      SyncLog.d('[CatchUp] Gate 阻止: 太频繁', role: 'client');
+      SyncLog.i(
+        '[CatchUp] Gate3 阻止: 太频繁，距上次 ${nowMs - _lastCatchUpAttemptAtMs}ms',
+        role: 'client',
+      );
       return;
     }
+
+    SyncLog.i('[CatchUp] 通过所有 Gate，开始执行追帧', role: 'client');
 
     // 通过 gate，标记尝试时间
     _lastCatchUpAttemptAtMs = nowMs;
@@ -980,10 +1490,37 @@ class SyncV2Controller {
     });
   }
 
-  /// 曲目缓存完成时检查是否需要追帧
+  /// 曲目缓存完成时检查是否需要追帧或自动播放
   void _onTrackReadyForCatchUp() {
     _trackReadyForCatchUp = true;
+
+    // 如果 Host 正在播放且曲目已就绪，直接开始播放
+    if (_hasHostStatePlaying && _latestHostState != null && _player == null) {
+      final hostState = _latestHostState!;
+      final localPath = _trackState.meta?.localPath;
+      if (localPath != null && localPath.isNotEmpty) {
+        // 异步初始化播放器并播放
+        _initPlayerAndPlay(localPath, hostState.hostPosMs);
+        return;
+      }
+    }
+
     _maybeTriggerCatchUp();
+  }
+
+  /// 初始化播放器并播放到指定位置
+  Future<void> _initPlayerAndPlay(String localPath, int posMs) async {
+    try {
+      _player = AudioPlayer();
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.music());
+      await _player!.setFilePath(localPath);
+      _player!.seek(Duration(milliseconds: posMs));
+      await _player!.play();
+      SyncLog.i('[Client] 曲目就绪后自动播放: pos=$posMs', role: 'client');
+    } catch (e) {
+      SyncLog.e('[Client] 初始化播放器失败', error: e);
+    }
   }
 
   /// 时钟锁定时检查是否需要追帧
@@ -994,9 +1531,19 @@ class SyncV2Controller {
 
   /// 执行追帧（使用未来时刻精确播放）
   Future<void> _performCatchUp(HostStateMessage hostState) async {
-    final localPath = _trackState.meta!.localPath;
-    final durationMs = _trackState.meta!.durationMs;
+    final localPath = _trackState.meta?.localPath;
+    final durationMs = _trackState.meta?.durationMs ?? 0;
     final latencyCompMs = _calibration.totalCompensationMs;
+
+    if (localPath == null || localPath.isEmpty) {
+      SyncLog.e('[CatchUp] 无法追帧: localPath 为空', role: 'client');
+      return;
+    }
+
+    SyncLog.i(
+      '[CatchUp] 开始执行: localPath=$localPath durationMs=$durationMs latencyCompMs=$latencyCompMs',
+      role: 'client',
+    );
 
     // 计算未来播放时刻（当前时间 + 准备时间）
     const prepareMs = 300; // 预留 300ms 准备时间
@@ -1011,7 +1558,8 @@ class SyncV2Controller {
     final clampedPosMs = hostFuturePosMs.clamp(0, durationMs);
 
     SyncLog.i(
-      '[CatchUp] hostPosMs=${hostState.hostPosMs} 采样时间=${hostState.sampledAtRoomTimeMs} 目标房间时间=$targetRoomTimeMs hostFuturePosMs=$hostFuturePosMs 延迟补偿=$latencyCompMs',
+      '[CatchUp] 计算结果: hostPosMs=${hostState.hostPosMs} 采样时间=${hostState.sampledAtRoomTimeMs} 目标房间时间=$targetRoomTimeMs hostFuturePosMs=$hostFuturePosMs 最终位置=$clampedPosMs',
+      role: 'client',
     );
 
     try {
@@ -1165,12 +1713,15 @@ class SyncV2Controller {
       final trackMeta = TrackMeta(
         trackId: trackId,
         localPath: filePath,
-        fileName: filePath.split('/').last,
+        fileName: filePath.split(Platform.pathSeparator).last,
         sizeBytes: sizeBytes,
         durationMs: durationMs,
         fileHash: fileHash,
         createdAt: DateTime.now(),
       );
+
+      // 添加到播放列表
+      addToPlaylist(trackMeta);
 
       _trackState = TrackState(status: TrackStatus.ready, meta: trackMeta);
       _trackStateController.add(_trackState);
@@ -1209,8 +1760,23 @@ class SyncV2Controller {
       role: 'host',
     );
 
-    // 启动 HTTP 文件服务器
-    final started = await _httpFileServer.start(track: meta);
+    // 获取客户端 IP，用于确定正确的网络接口
+    final clientIp = _transport.getFirstClientIp();
+    String? preferredIp;
+    if (clientIp != null) {
+      // 根据客户端 IP 选择匹配的本地 IP
+      preferredIp = await _selectMatchingLocalIp(clientIp);
+      SyncLog.i(
+        '[Host] Client IP: $clientIp, selected local IP: $preferredIp',
+        role: 'host',
+      );
+    }
+
+    // 启动 HTTP 文件服务器（使用选定的 IP）
+    final started = await _httpFileServer.start(
+      track: meta,
+      preferredIp: preferredIp,
+    );
     if (!started) {
       _trackState = TrackState(
         status: TrackStatus.error,
@@ -1271,11 +1837,25 @@ class SyncV2Controller {
 
   /// 向指定 Client 发送曲目公告（新 Client 加入时调用）
   void _sendTrackAnnounceToPeer(String clientPeerId) {
-    if (_trackState.meta == null) return;
+    if (_trackState.meta == null) {
+      SyncLog.w('[Host] _sendTrackAnnounceToPeer: 无曲目信息', role: 'host');
+      return;
+    }
 
     final meta = _trackState.meta!;
     final serviceUrl = _httpFileServer.serviceUrl;
-    if (serviceUrl.isEmpty) return;
+    if (serviceUrl.isEmpty) {
+      SyncLog.w(
+        '[Host] _sendTrackAnnounceToPeer: HTTP 服务 URL 为空',
+        role: 'host',
+      );
+      return;
+    }
+
+    if (_roomId == null) {
+      SyncLog.w('[Host] _sendTrackAnnounceToPeer: roomId 为 null', role: 'host');
+      return;
+    }
 
     final announce = TrackAnnounceMessage(
       roomId: _roomId!,
@@ -1289,13 +1869,43 @@ class SyncV2Controller {
     );
 
     SyncLog.i(
-      '[Host] Sending track_announce to new client: $clientPeerId, trackId=${announce.trackId}',
+      '[Host] Sending track_announce to new client: $clientPeerId, trackId=${announce.trackId}, url=$serviceUrl',
       role: 'host',
     );
 
     _transport.sendToPeer(
       clientPeerId,
       TransportMessage.create(announce.type, announce.toJson()),
+    );
+  }
+
+  /// 向新 Client 发送当前播放状态（让它能自动跟随播放）
+  void _sendCurrentStateToNewClient(String clientPeerId) {
+    if (_hostPlayer == null || _trackState.meta == null) return;
+
+    final isPlaying = _hostPlayer!.playing;
+    final hostPosMs = _hostPlayer!.position.inMilliseconds;
+    final sampledAtRoomTimeMs = _clock.roomNowMs;
+
+    // 发送 host_state 给新 Client
+    final hostState = HostStateMessage(
+      roomId: _roomId ?? '',
+      trackId: _trackState.meta?.trackId ?? '',
+      isPlaying: isPlaying,
+      hostPosMs: hostPosMs,
+      sampledAtRoomTimeMs: sampledAtRoomTimeMs,
+      epoch: _epoch,
+      seq: 0,
+    );
+
+    _transport.sendToPeer(
+      clientPeerId,
+      TransportMessage.create(hostState.type, hostState.toJson()),
+    );
+
+    SyncLog.i(
+      '[Host] 发送当前播放状态给新 Client: $clientPeerId, isPlaying=$isPlaying, pos=$hostPosMs',
+      role: 'host',
     );
   }
 
@@ -1375,6 +1985,34 @@ class SyncV2Controller {
     return true;
   }
 
+  /// 初始化 Host 播放器并设置监听
+  Future<void> _ensureHostPlayerInitialized() async {
+    if (_hostPlayer == null) {
+      _hostPlayer = AudioPlayer();
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.music());
+
+      // 监听播放位置并分发
+      _hostPlayer!.positionStream.listen((pos) {
+        _positionController.add(pos);
+      });
+
+      // 监听播放状态并分发
+      _hostPlayer!.playerStateStream.listen((state) {
+        _playerStateController.add(state);
+      });
+
+      // 监听播放完成事件
+      _hostPlayerStateSub?.cancel();
+      _hostPlayerStateSub = _hostPlayer!.playerStateStream.listen((state) {
+        if (state.processingState == ProcessingState.completed) {
+          SyncLog.i('[Host] 播放完成，自动播放下一首', role: 'host');
+          nextTrack();
+        }
+      });
+    }
+  }
+
   /// Host 执行 FutureStart（播放本地 MP3）
   Future<void> _executeHostFutureStart({
     required String trackId,
@@ -1386,12 +2024,8 @@ class SyncV2Controller {
 
     final localPath = _trackState.meta!.localPath;
     try {
-      // 初始化播放器（如果尚未初始化）
-      if (_hostPlayer == null) {
-        _hostPlayer = AudioPlayer();
-        final session = await AudioSession.instance;
-        await session.configure(const AudioSessionConfiguration.music());
-      }
+      // 使用统一初始化方法确保监听被正确设置
+      await _ensureHostPlayerInitialized();
 
       await _hostPlayer!.setFilePath(localPath);
       if (startPosMs > 0) {
@@ -1513,6 +2147,9 @@ class SyncV2Controller {
       TransportMessage.create(message.type, message.toJson()),
     );
 
+    // 同时通知 Host 自身的 UI 更新进度
+    _updateState();
+
     SyncLog.d(
       '[Host] Broadcast host_state: isPlaying=$isPlaying pos=$hostPosMs sampledAt=$sampledAtRoomTimeMs',
       role: 'host',
@@ -1548,6 +2185,87 @@ class SyncV2Controller {
     await _stopPlayer();
     _trackState = const TrackState();
     _trackStateController.add(_trackState);
+  }
+
+  /// 重试下载曲目（Client）
+  /// 当下载失败时，使用保存的元数据重新下载
+  Future<bool> retryDownload() async {
+    if (_role != SyncRole.client) {
+      SyncLog.w('[Client] retryDownload: not client role');
+      return false;
+    }
+
+    final meta = _trackState.meta;
+    if (meta == null || meta.url == null || meta.url!.isEmpty) {
+      SyncLog.w('[Client] retryDownload: no track meta or url');
+      return false;
+    }
+
+    SyncLog.i(
+      '[Client] 重试下载: trackId=${meta.trackId} url=${meta.url}',
+      role: 'client',
+    );
+
+    // 重置状态为下载中
+    _trackState = TrackState(status: TrackStatus.announcing, meta: meta);
+    _trackStateController.add(_trackState);
+
+    // 重新下载
+    final result = await _cache.downloadAndCache(
+      trackId: meta.trackId,
+      url: meta.url!,
+      expectedHash: meta.fileHash,
+      expectedSize: meta.sizeBytes,
+    );
+
+    if (result.success) {
+      // 发送 ready 消息
+      final readyMsg = ClientReadyMessage(
+        roomId: _roomId ?? '',
+        peerId: _peerId!,
+        trackId: meta.trackId,
+        cached: true,
+        localPath: result.localPath!,
+        prepareMs: result.prepareMs,
+      );
+      _transport.send(
+        TransportMessage.create(readyMsg.type, readyMsg.toJson()),
+      );
+
+      SyncLog.i('[Client] 重试下载成功: ${meta.trackId}', role: 'client');
+
+      _trackState = TrackState(
+        status: TrackStatus.serving,
+        meta: meta.copyWith(localPath: result.localPath!),
+      );
+      _trackStateController.add(_trackState);
+
+      // 预先初始化播放器
+      await _preInitPlayer(result.localPath!);
+      return true;
+    } else {
+      // 发送错误消息
+      final errorMsg = ClientReadyErrorMessage(
+        roomId: _roomId ?? '',
+        peerId: _peerId!,
+        trackId: meta.trackId,
+        errorCode: result.errorCode ?? 'unknown',
+        errorMessage: result.errorMessage ?? 'Unknown error',
+      );
+      _transport.send(
+        TransportMessage.create(errorMsg.type, errorMsg.toJson()),
+      );
+
+      SyncLog.e('[Client] 重试下载失败: ${result.errorCode}', role: 'client');
+
+      _trackState = TrackState(
+        status: TrackStatus.error,
+        meta: meta,
+        error: result.errorMessage,
+      );
+      _trackStateController.add(_trackState);
+      return false;
+    }
   }
 
   /// 获取已缓存的曲目列表
@@ -1626,13 +2344,16 @@ class SyncV2Controller {
   Stream<Duration> get positionStream => _positionController.stream;
 
   /// 当前播放状态
-  PlayerState? get playerState => _player?.playerState;
+  PlayerState? get playerState =>
+      _player?.playerState ?? _hostPlayer?.playerState;
 
   /// 当前播放位置
-  Duration? get position => _player?.position;
+  Duration? get position =>
+      _role == SyncRole.host ? _hostPlayer?.position : _player?.position;
 
   /// 当前播放时长
-  Duration? get duration => _player?.duration ?? _hostPlayer?.duration;
+  Duration? get duration =>
+      _role == SyncRole.host ? _hostPlayer?.duration : _player?.duration;
 
   // ==================== 统一播放控制 ====================
 
@@ -1651,9 +2372,92 @@ class SyncV2Controller {
   Future<void> pause() async {
     if (_role == SyncRole.host) {
       await _hostPlayer?.pause();
+      // Host 暂停时停止状态广播
+      _stopHostStateBroadcast();
     } else if (_role == SyncRole.client) {
       await _player?.pause();
     }
+  }
+
+  /// Host 暂停并广播给所有 Client
+  /// 本地播放模式（none）也可以使用
+  Future<void> pauseAndBroadcast() async {
+    // 暂停本地播放器
+    await _hostPlayer?.pause();
+
+    // 只有在房间内才广播
+    if (_role == SyncRole.host && _roomId != null) {
+      // 停止状态广播
+      _stopHostStateBroadcast();
+
+      // 广播暂停指令
+      final message = PauseCommandMessage(
+        roomId: _roomId ?? '',
+        epoch: _epoch,
+        pauseAtRoomTimeMs: _clock.roomNowMs,
+      );
+
+      _transport.broadcast(
+        TransportMessage.create(message.type, message.toJson()),
+      );
+
+      SyncLog.i('[Host] Broadcast pause command, epoch=$_epoch', role: 'host');
+    }
+
+    // 通知 UI 更新
+    _stateController.add(
+      SyncV2State(
+        role: _role,
+        roomId: _roomId,
+        peerId: _peerId,
+        diagnostics: _diagnostics.data,
+      ),
+    );
+  }
+
+  /// Host 恢复播放并广播给所有 Client
+  /// 本地播放模式（none）也可以使用
+  Future<void> resumeAndBroadcast() async {
+    // 获取当前播放位置
+    final currentPosMs = _hostPlayer?.position.inMilliseconds ?? 0;
+
+    // 恢复本地播放器（从暂停位置继续）
+    await _hostPlayer?.play();
+
+    // 只有在房间内才广播
+    if (_role == SyncRole.host && _roomId != null) {
+      // 启动状态广播
+      _startHostStateBroadcast();
+
+      // 广播恢复播放指令（让 Client 从暂停位置继续，包含当前播放位置）
+      final message = ResumeCommandMessage(
+        roomId: _roomId ?? '',
+        epoch: _epoch,
+        resumeAtRoomTimeMs: _clock.roomNowMs,
+        resumePosMs: currentPosMs, // 添加播放位置
+      );
+
+      _transport.broadcast(
+        TransportMessage.create(message.type, message.toJson()),
+      );
+
+      SyncLog.i(
+        '[Host] Resume playback and broadcast, epoch=$_epoch, pos=$currentPosMs',
+        role: 'host',
+      );
+    } else if (_role == SyncRole.none) {
+      SyncLog.i('[Playlist] 本地播放恢复: pos=$currentPosMs');
+    }
+
+    // 通知 UI 更新
+    _stateController.add(
+      SyncV2State(
+        role: _role,
+        roomId: _roomId,
+        peerId: _peerId,
+        diagnostics: _diagnostics.data,
+      ),
+    );
   }
 
   /// Seek 到指定位置（用于模拟偏移测试）
@@ -1683,6 +2487,36 @@ class SyncV2Controller {
     }
   }
 
+  /// Host 跳转进度并广播给所有 Client
+  Future<void> seekToAndBroadcast(int targetPosMs) async {
+    if (_role != SyncRole.host) return;
+
+    final duration = _hostPlayer?.duration?.inMilliseconds ?? 0;
+    final clampedPos = targetPosMs.clamp(0, duration);
+
+    SyncLog.i('[Host] Seek to $clampedPos ms and broadcast', role: 'host');
+
+    // 跳转本地播放器
+    await _hostPlayer?.seek(Duration(milliseconds: clampedPos));
+
+    // 广播跳转指令给所有 Client
+    final message = SeekCommandMessage(
+      roomId: _roomId ?? '',
+      epoch: _epoch,
+      seekPosMs: clampedPos,
+      seekAtRoomTimeMs: _clock.roomNowMs,
+    );
+
+    _transport.broadcast(
+      TransportMessage.create(message.type, message.toJson()),
+    );
+
+    SyncLog.i(
+      '[Host] Broadcast seek command: epoch=$_epoch, pos=$clampedPos',
+      role: 'host',
+    );
+  }
+
   /// Host 播放本地 MP3
   Future<bool> _hostPlay() async {
     if (_role != SyncRole.host) return false;
@@ -1694,14 +2528,8 @@ class SyncV2Controller {
     }
 
     try {
-      // 初始化播放器
-      if (_hostPlayer == null) {
-        _hostPlayer = AudioPlayer();
-
-        // 配置 audio session
-        final session = await AudioSession.instance;
-        await session.configure(const AudioSessionConfiguration.music());
-      }
+      // 使用统一初始化方法确保监听被正确设置
+      await _ensureHostPlayerInitialized();
 
       // 如果正在播放，继续播放
       if (_hostPlayer!.playing) {
@@ -1711,6 +2539,10 @@ class SyncV2Controller {
       // 如果已加载文件，继续播放
       if (_hostPlayer!.duration != null) {
         await _hostPlayer!.play();
+        // Host 恢复播放时启动状态广播（只有在房间内才广播）
+        if (_roomId != null) {
+          _startHostStateBroadcast();
+        }
         return true;
       }
 
@@ -1720,6 +2552,12 @@ class SyncV2Controller {
         '[Host] Playing local track: ${meta.localPath}, duration: $duration',
       );
       await _hostPlayer!.play();
+
+      // Host 播放时启动状态广播（只有在房间内才广播）
+      if (_roomId != null) {
+        _startHostStateBroadcast();
+      }
+
       return true;
     } catch (e, s) {
       SyncLog.e('[Host] _hostPlay failed', error: e, stackTrace: s);
@@ -1852,6 +2690,11 @@ class SyncV2Controller {
 
   /// 开始扫描房间
   Future<void> startScanning() async {
+    // 如果已经是 host 或 client，不允许扫描
+    if (_role != SyncRole.none) {
+      SyncLog.w('[SyncV2] Cannot scan: already in a room', role: _role.name);
+      return;
+    }
     await _mdnsService.startScanning();
     _throttledNotifier.updatePartial(state: 'discovering');
   }
@@ -1865,10 +2708,14 @@ class SyncV2Controller {
   }
 
   /// 加入房间（Client）
-  Future<bool> joinRoom(DiscoveredRoom room) async {
+  /// 返回值: true=成功加入, false=失败, null=已在房间中
+  Future<bool?> joinRoom(DiscoveredRoom room) async {
     if (_role != SyncRole.none) {
-      SyncLog.w('Already in a room', role: 'client');
-      return false;
+      SyncLog.w(
+        '[SyncV2] Cannot join: current role=${_role.name}, roomId=$_roomId, peerId=$_peerId',
+        role: 'client',
+      );
+      return null; // 已在房间中
     }
 
     _roomId = room.roomId;
@@ -1949,7 +2796,8 @@ class SyncV2Controller {
   }
 
   /// 手动输入 Host IP 加入（fallback 方案）
-  Future<bool> joinByIp(String hostIp, int wsPort) async {
+  /// 返回值: true=成功加入, false=失败, null=已在房间中
+  Future<bool?> joinByIp(String hostIp, int wsPort) async {
     // 创建临时房间信息
     final tempRoom = DiscoveredRoom(
       roomId: 'manual_${DateTime.now().millisecondsSinceEpoch}',
@@ -2008,6 +2856,7 @@ class SyncV2Controller {
   void dispose() {
     _transportStateSub?.cancel();
     _transportMessageSub?.cancel();
+    _hostPlayerStateSub?.cancel();
     _stopHostStateBroadcast();
     closeRoom();
     leaveRoom();
@@ -2031,4 +2880,497 @@ class SyncV2Controller {
 
   /// KeepSync 是否启用
   bool get keepSyncEnabled => _keepSync.enabled;
+
+  // ==================== 播放列表操作 ====================
+
+  /// 添加曲目到播放列表
+  void addToPlaylist(TrackMeta track) {
+    // 检查是否已存在相同 fileHash 的曲目（同一文件）
+    final existingIndex = _playlist.indexWhere(
+      (t) => t.fileHash == track.fileHash,
+    );
+    if (existingIndex >= 0) {
+      SyncLog.i(
+        '[Playlist] 曲目已存在，跳过: ${track.fileName}, hash=${track.fileHash.substring(0, 8)}..., 索引=$existingIndex',
+      );
+      return;
+    }
+
+    _playlist.add(track);
+    // 如果是第一首曲目，自动设置为当前曲目
+    if (_currentIndex < 0 && _playlist.length == 1) {
+      _currentIndex = 0;
+      // 同步更新 _trackState 以保持 UI 一致
+      _trackState = TrackState(status: TrackStatus.ready, meta: track);
+      _trackStateController.add(_trackState);
+    }
+    SyncLog.i(
+      '[Playlist] 添加曲目: ${track.trackId}, 总数=${_playlist.length}, 当前索引=$_currentIndex',
+    );
+    // 持久化保存
+    _persistence.savePlaylist(_playlist, currentIndex: _currentIndex);
+  }
+
+  /// 清空播放列表
+  void clearPlaylist() {
+    _playlist.clear();
+    _currentIndex = -1;
+    SyncLog.i('[Playlist] 已清空');
+    // 清除持久化数据
+    _persistence.clearPlaylist();
+  }
+
+  /// 从持久化存储加载播放列表
+  Future<void> loadPersistedPlaylist() async {
+    final result = await _persistence.loadPlaylist();
+    if (result.tracks.isNotEmpty) {
+      _playlist.clear();
+      _playlist.addAll(result.tracks);
+      _currentIndex = result.currentIndex;
+      if (_currentIndex >= 0 && _currentIndex < _playlist.length) {
+        _trackState = TrackState(
+          status: TrackStatus.ready,
+          meta: _playlist[_currentIndex],
+        );
+        _trackStateController.add(_trackState);
+      }
+      SyncLog.i(
+        '[Playlist] 从持久化加载: ${_playlist.length} 首, 当前索引=$_currentIndex',
+      );
+    }
+  }
+
+  /// 上一首（Host 端）
+  /// 返回是否成功切换
+  Future<bool> previousTrack() async {
+    if (_role != SyncRole.host) {
+      SyncLog.w('[Playlist] previousTrack: not host role');
+      return false;
+    }
+
+    if (!hasPreviousTrack) {
+      SyncLog.i('[Playlist] previousTrack: 没有上一首');
+      return false;
+    }
+
+    // 先暂停当前播放
+    await _hostPlayer?.pause();
+    _stopHostStateBroadcast();
+
+    _currentIndex--;
+    final track = _playlist[_currentIndex];
+    SyncLog.i(
+      '[Playlist] 切换到上一首: index=$_currentIndex, trackId=${track.trackId}',
+      role: 'host',
+    );
+
+    // 设置新曲目并开始分发
+    return await _loadAndServeTrack(track);
+  }
+
+  /// 下一首（Host 端）
+  /// 返回是否成功切换
+  /// 根据播放模式决定下一首
+  Future<bool> nextTrack() async {
+    if (_role != SyncRole.host) {
+      SyncLog.w('[Playlist] nextTrack: not host role');
+      return false;
+    }
+
+    if (_playlist.isEmpty || _currentIndex < 0) {
+      SyncLog.i('[Playlist] nextTrack: 播放列表为空');
+      return false;
+    }
+
+    // 先暂停当前播放
+    await _hostPlayer?.pause();
+    _stopHostStateBroadcast();
+
+    // 根据播放模式决定下一首
+    int nextIndex;
+    switch (_playMode) {
+      case PlayMode.loop:
+        // 列表循环：最后一首回到第一首
+        if (_currentIndex >= _playlist.length - 1) {
+          nextIndex = 0;
+          SyncLog.i('[Playlist] 列表循环：回到第一首', role: 'host');
+        } else {
+          nextIndex = _currentIndex + 1;
+        }
+        break;
+      case PlayMode.single:
+        // 单曲循环：保持当前索引
+        nextIndex = _currentIndex;
+        SyncLog.i('[Playlist] 单曲循环', role: 'host');
+        break;
+      case PlayMode.shuffle:
+        // 随机播放：从随机顺序中选取下一个
+        if (_shuffleOrder.isEmpty) {
+          _generateShuffleOrder();
+        }
+        final currentShuffleIndex = _shuffleOrder.indexOf(_currentIndex);
+        if (currentShuffleIndex >= _shuffleOrder.length - 1) {
+          // 重新生成随机顺序
+          _generateShuffleOrder();
+          nextIndex = _shuffleOrder.isNotEmpty ? _shuffleOrder[0] : 0;
+        } else {
+          nextIndex = _shuffleOrder[currentShuffleIndex + 1];
+        }
+        SyncLog.i('[Playlist] 随机播放: shuffleIndex=$nextIndex', role: 'host');
+        break;
+    }
+
+    _currentIndex = nextIndex;
+    final track = _playlist[_currentIndex];
+    SyncLog.i(
+      '[Playlist] 切换到下一首: index=$_currentIndex, trackId=${track.trackId}',
+      role: 'host',
+    );
+
+    // 设置新曲目并开始分发
+    return await _loadAndServeTrack(track);
+  }
+
+  /// 加载曲目并开始分发（内部方法）
+  Future<bool> _loadAndServeTrack(TrackMeta track) async {
+    try {
+      // 更新曲目状态
+      _trackState = TrackState(status: TrackStatus.ready, meta: track);
+      _trackStateController.add(_trackState);
+
+      // 重置 FutureStart 状态
+      _futureStartState = FutureStartState.idle;
+      _epoch++;
+      _seq = 0;
+
+      // 开始分发
+      final success = await startServingTrack();
+      if (!success) {
+        SyncLog.e('[Playlist] 分发曲目失败: ${track.trackId}');
+        return false;
+      }
+
+      // Host 需要加载并播放新曲目
+      if (_role == SyncRole.host) {
+        try {
+          // 初始化播放器（如果尚未初始化）
+          if (_hostPlayer == null) {
+            _hostPlayer = AudioPlayer();
+            final session = await AudioSession.instance;
+            await session.configure(const AudioSessionConfiguration.music());
+          }
+
+          // 加载新曲目
+          await _hostPlayer!.setFilePath(track.localPath);
+          SyncLog.i(
+            '[Host] 已加载新曲目: ${track.fileName}, duration=${_hostPlayer!.duration}',
+            role: 'host',
+          );
+
+          // 等待 Client 准备好（最多等待 3 秒）
+          final clientCount = peerCount;
+          if (clientCount > 0) {
+            SyncLog.i('[Host] 等待 $clientCount 个 Client 准备好...', role: 'host');
+            // 使用 Future.wait 等待一段时间，让 Client 有时间下载
+            await Future.delayed(const Duration(milliseconds: 500));
+          }
+
+          // 计算同步开播时间（给 Client 准备时间）
+          final prepareMs = 1000; // 预留 1000ms 准备时间
+          final startAtRoomTimeMs = _clock.roomNowMs + prepareMs;
+
+          // 广播 start_at 消息让 Client 同步开始
+          final startAtMsg = StartAtMessage(
+            epoch: _epoch,
+            seq: _seq++,
+            trackId: track.trackId,
+            startAtRoomTimeMs: startAtRoomTimeMs,
+            startPosMs: 0, // 从头开始播放
+          );
+
+          _transport.broadcast(
+            TransportMessage.create(startAtMsg.type, startAtMsg.toJson()),
+          );
+
+          SyncLog.i(
+            '[Host] 已广播 start_at: epoch=$_epoch startAt=$startAtRoomTimeMs',
+            role: 'host',
+          );
+
+          // Host 也使用 FutureStart 同步开播
+          await _futureStart.schedule(
+            params: FutureStartParams(
+              epoch: _epoch,
+              seq: _seq - 1,
+              trackId: track.trackId,
+              startAtRoomTimeMs: startAtRoomTimeMs,
+              startPosMs: 0,
+            ),
+            onPrepare: (params) async {
+              _futureStartState = FutureStartState.preparing;
+              // 播放器已加载，无需重新加载
+              return FutureStartResult(success: true);
+            },
+            onStart: (params) {
+              _hostPlayer?.play();
+              _startHostStateBroadcast();
+              SyncLog.i('[Host] 切换曲目同步开播完成', role: 'host');
+            },
+          );
+
+          SyncLog.i('[Host] 已开始播放新曲目', role: 'host');
+
+          // 检查是否有下一首曲目，设置预缓存
+          _announceNextTrack();
+        } catch (e) {
+          SyncLog.e('[Host] 加载播放曲目失败: ${track.trackId}', error: e);
+          return false;
+        }
+      }
+
+      return true;
+    } catch (e) {
+      SyncLog.e('[Playlist] 加载曲目失败: ${track.trackId}', error: e);
+      return false;
+    }
+  }
+
+  /// 广播下一首曲目预缓存公告
+  void _announceNextTrack() {
+    if (_role != SyncRole.host) return;
+
+    if (_playlist.isEmpty || _currentIndex < 0) return;
+
+    // 循环播放：下一首是第一首
+    int nextIndex;
+    if (_currentIndex >= _playlist.length - 1) {
+      nextIndex = 0; // 循环回到第一首
+    } else {
+      nextIndex = _currentIndex + 1;
+    }
+
+    final nextTrack = _playlist[nextIndex];
+    _httpFileServer.setNextTrack(nextTrack);
+
+    final nextTrackUrl = _httpFileServer.nextTrackUrl;
+    if (nextTrackUrl.isEmpty) {
+      SyncLog.w('[Host] 下一首曲目 URL 为空', role: 'host');
+      return;
+    }
+
+    final announce = NextTrackAnnounceMessage(
+      roomId: _roomId!,
+      hostPeerId: _peerId!,
+      trackId: nextTrack.trackId,
+      url: nextTrackUrl,
+      fileHash: nextTrack.fileHash,
+      sizeBytes: nextTrack.sizeBytes,
+      durationMs: nextTrack.durationMs,
+      fileName: nextTrack.fileName,
+    );
+
+    _transport.broadcast(
+      TransportMessage.create(announce.type, announce.toJson()),
+    );
+
+    SyncLog.i('[Host] 已广播下一首预缓存: trackId=${nextTrack.trackId}', role: 'host');
+  }
+
+  /// 播放指定索引的曲目
+  /// Host 端：同步播放并分发
+  /// 无角色：本地播放（不需要房间）
+  /// 返回是否成功切换
+  Future<bool> playTrackAtIndex(int index) async {
+    if (index < 0 || index >= _playlist.length) {
+      SyncLog.w('[Playlist] playTrackAtIndex: invalid index=$index');
+      return false;
+    }
+
+    final track = _playlist[index];
+
+    // Host 角色：同步播放
+    if (_role == SyncRole.host) {
+      // 先暂停当前播放
+      await _hostPlayer?.pause();
+      _stopHostStateBroadcast();
+
+      _currentIndex = index;
+      SyncLog.i(
+        '[Playlist] Host 切换曲目: index=$_currentIndex, trackId=${track.trackId}',
+        role: 'host',
+      );
+
+      return await _loadAndServeTrack(track);
+    }
+
+    // 无角色：本地播放模式
+    if (_role == SyncRole.none) {
+      _currentIndex = index;
+      SyncLog.i(
+        '[Playlist] 本地播放: index=$_currentIndex, trackId=${track.trackId}',
+      );
+
+      return await _playLocal(track);
+    }
+
+    // Client 角色：不支持主动切换曲目
+    SyncLog.w(
+      '[Playlist] playTrackAtIndex: client role cannot control playback',
+    );
+    return false;
+  }
+
+  /// 本地播放（不需要房间）
+  Future<bool> _playLocal(TrackMeta track) async {
+    try {
+      // 初始化本地播放器
+      if (_hostPlayer == null) {
+        _hostPlayer = AudioPlayer();
+        final session = await AudioSession.instance;
+        await session.configure(const AudioSessionConfiguration.music());
+
+        // 监听播放完成事件
+        _hostPlayerStateSub?.cancel();
+        _hostPlayerStateSub = _hostPlayer!.playerStateStream.listen((state) {
+          if (state.processingState == ProcessingState.completed) {
+            SyncLog.i('[Playlist] 播放完成，自动播放下一首, role=$_role');
+            if (_role == SyncRole.host && _roomId != null) {
+              // 房间内使用 nextTrack 广播给客户端
+              nextTrack();
+            } else {
+              // 本地播放使用 _playNextTrackLocal
+              _playNextTrackLocal();
+            }
+          }
+        });
+      }
+
+      // 加载曲目
+      await _hostPlayer!.setFilePath(track.localPath);
+
+      SyncLog.i(
+        '[Playlist] 本地播放加载完成: ${track.fileName}, duration=${_hostPlayer!.duration}',
+      );
+
+      // 开始播放
+      _hostPlayer!.play();
+
+      // 更新曲目状态
+      _trackState = TrackState(status: TrackStatus.ready, meta: track);
+      _trackStateController.add(_trackState);
+
+      // 通知 UI 更新
+      _updateState();
+
+      SyncLog.i('[Playlist] 本地播放开始: ${track.fileName}');
+      return true;
+    } catch (e) {
+      SyncLog.e('[Playlist] 本地播放失败: ${track.trackId}', error: e);
+      return false;
+    }
+  }
+
+  /// 本地播放下一首（根据播放模式）
+  Future<void> _playNextTrackLocal() async {
+    if (_playlist.isEmpty || _currentIndex < 0) {
+      SyncLog.i('[Playlist] 播放列表为空，无法播放下一首');
+      return;
+    }
+
+    // 根据播放模式决定下一首
+    int nextIndex;
+    switch (_playMode) {
+      case PlayMode.loop:
+        // 列表循环
+        if (_currentIndex >= _playlist.length - 1) {
+          nextIndex = 0;
+          SyncLog.i('[Playlist] 列表循环：回到第一首');
+        } else {
+          nextIndex = _currentIndex + 1;
+        }
+        break;
+      case PlayMode.single:
+        // 单曲循环
+        nextIndex = _currentIndex;
+        SyncLog.i('[Playlist] 单曲循环');
+        break;
+      case PlayMode.shuffle:
+        // 随机播放
+        if (_shuffleOrder.isEmpty) {
+          _generateShuffleOrder();
+        }
+        final currentShuffleIndex = _shuffleOrder.indexOf(_currentIndex);
+        if (currentShuffleIndex >= _shuffleOrder.length - 1) {
+          _generateShuffleOrder();
+          nextIndex = _shuffleOrder.isNotEmpty ? _shuffleOrder[0] : 0;
+        } else {
+          nextIndex = _shuffleOrder[currentShuffleIndex + 1];
+        }
+        SyncLog.i('[Playlist] 随机播放: index=$nextIndex');
+        break;
+    }
+
+    _currentIndex = nextIndex;
+    final track = _playlist[_currentIndex];
+    SyncLog.i(
+      '[Playlist] 自动播放下一首: index=$_currentIndex, trackId=${track.trackId}',
+    );
+
+    await _playLocal(track);
+    _updateState();
+  }
+
+  /// 根据客户端 IP 选择匹配的本地 IP
+  /// 选择与客户端在同一子网的本地 IP
+  Future<String?> _selectMatchingLocalIp(String clientIp) async {
+    try {
+      final interfaces = await NetworkInterface.list();
+
+      // 解析客户端 IP 的子网前缀
+      final clientParts = clientIp.split('.');
+      if (clientParts.length != 4) {
+        SyncLog.w('[Host] Invalid client IP format: $clientIp');
+        return null;
+      }
+
+      // 尝试找到同一子网的本地 IP
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            final localParts = addr.address.split('.');
+            if (localParts.length == 4) {
+              // 检查前三段是否相同（/24 子网）
+              if (clientParts[0] == localParts[0] &&
+                  clientParts[1] == localParts[1] &&
+                  clientParts[2] == localParts[2]) {
+                SyncLog.i(
+                  '[Host] Found matching subnet: client=$clientIp, local=${addr.address}',
+                  role: 'host',
+                );
+                return addr.address;
+              }
+            }
+          }
+        }
+      }
+
+      // 如果没有找到同一子网的，返回第一个非回环 IPv4 地址
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            SyncLog.w(
+              '[Host] No matching subnet found, using first available: ${addr.address}',
+              role: 'host',
+            );
+            return addr.address;
+          }
+        }
+      }
+
+      return null;
+    } catch (e) {
+      SyncLog.e('[Host] Error selecting local IP', error: e);
+      return null;
+    }
+  }
 }

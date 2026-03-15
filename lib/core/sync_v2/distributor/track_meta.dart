@@ -2,6 +2,7 @@
 class TrackMeta {
   final String trackId;
   final String localPath;
+  final String? url; // 下载地址（用于重试）
   final String? fileName;
   final int sizeBytes;
   final int durationMs;
@@ -11,6 +12,7 @@ class TrackMeta {
   const TrackMeta({
     required this.trackId,
     required this.localPath,
+    this.url,
     this.fileName,
     required this.sizeBytes,
     required this.durationMs,
@@ -48,6 +50,7 @@ class TrackMeta {
   Map<String, dynamic> toJson() => {
     'trackId': trackId,
     'localPath': localPath,
+    'url': url,
     'fileName': fileName,
     'sizeBytes': sizeBytes,
     'durationMs': durationMs,
@@ -58,6 +61,7 @@ class TrackMeta {
   TrackMeta copyWith({
     String? trackId,
     String? localPath,
+    String? url,
     String? fileName,
     int? sizeBytes,
     int? durationMs,
@@ -67,6 +71,7 @@ class TrackMeta {
     return TrackMeta(
       trackId: trackId ?? this.trackId,
       localPath: localPath ?? this.localPath,
+      url: url ?? this.url,
       fileName: fileName ?? this.fileName,
       sizeBytes: sizeBytes ?? this.sizeBytes,
       durationMs: durationMs ?? this.durationMs,
@@ -79,6 +84,7 @@ class TrackMeta {
     return TrackMeta(
       trackId: json['trackId'] as String,
       localPath: json['localPath'] as String,
+      url: json['url'] as String?,
       fileName: json['fileName'] as String?,
       sizeBytes: json['sizeBytes'] as int,
       durationMs: json['durationMs'] as int,

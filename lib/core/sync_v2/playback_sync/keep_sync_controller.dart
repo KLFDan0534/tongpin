@@ -292,10 +292,39 @@ class KeepSyncController {
 
     // 检查 epoch/trackId 是否变化
     if (_activeEpoch != epoch || _activeTrackId != trackId) {
+      SyncLog.i(
+        '[KeepSync] 检测到 epoch/trackId 变化: 旧epoch=$_activeEpoch 新epoch=$epoch 旧trackId=$_activeTrackId 新trackId=$trackId',
+      );
       reset();
       _activeEpoch = epoch;
       _activeTrackId = trackId;
-      SyncLog.i('[KeepSync] 重置: epoch=$epoch trackId=$trackId');
+
+      // epoch 变化后，如果偏差大，立即进行一次 seek 同步
+      if (deltaMs.abs() > 500) {
+        SyncLog.i('[KeepSync] epoch 变化且偏差大($deltaMs)，立即 seek 到 $targetPosMs');
+        _lastSeekAtMs = DateTime.now().millisecondsSinceEpoch;
+        _seekCount++;
+        return KeepSyncDecision(
+          action: KeepSyncAction.seek,
+          seekMs: targetPosMs,
+          deltaMs: deltaMs,
+          predictedDeltaMs: predictedDeltaMs,
+          targetPosMs: targetPosMs,
+          clientPosMs: clientPosMs,
+          reason: 'epoch_changed_seek',
+        );
+      }
+
+      SyncLog.i('[KeepSync] epoch 变化但偏差小($deltaMs)，返回 noop');
+      // 重置后返回 noop，让下一次 host_state 再做决策
+      return KeepSyncDecision(
+        action: KeepSyncAction.noop,
+        deltaMs: deltaMs,
+        predictedDeltaMs: predictedDeltaMs,
+        targetPosMs: targetPosMs,
+        clientPosMs: clientPosMs,
+        reason: 'epoch_changed',
+      );
     }
 
     // 获取当前时间
