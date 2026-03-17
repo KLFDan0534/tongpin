@@ -18,7 +18,7 @@ class SyncTuneApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '同频 SyncTune',
+      title: 'tongpin SyncTune',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

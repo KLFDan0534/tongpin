@@ -121,7 +121,7 @@ class _DiscoveryPageState extends State<DiscoveryPage>
       backgroundColor: AppColors.lightBackground,
       elevation: 0,
       title: const Text(
-        '同频 SyncTune',
+        'tongpin SyncTune',
         style: TextStyle(
           fontFamily: 'Inter',
           fontSize: 20,
