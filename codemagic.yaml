@@ -1,0 +1,35 @@
+# Codemagic CI/CD 配置文件
+# 用于自动化构建和部署 Flutter 应用
+
+workflows:
+  flutter-app:
+    name: tongpin
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      # 获取依赖
+      - name: Get dependencies
+        script: flutter pub get
+      
+      # 运行测试
+      - name: Run tests
+        script: flutter test
+        
+      # 构建 Android APK
+      - name: Build Android APK
+        script: flutter build apk --release
+        
+      # 构建 iOS (需要在 macOS 环境运行)
+      - name: Build iOS
+        script: flutter build ios --release --no-codesign
+    artifacts:
+      - build/**/outputs/**/*.apk
+      - build/ios/ipa/*.ipa
+      - build/ios/iphoneos/*.app
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
