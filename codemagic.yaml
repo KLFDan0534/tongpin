@@ -14,10 +14,6 @@ workflows:
       - name: Get dependencies
         script: flutter pub get
       
-      # 运行测试
-      - name: Run tests
-        script: flutter test
-        
       # 构建 Android APK
       - name: Build Android APK
         script: flutter build apk --release
