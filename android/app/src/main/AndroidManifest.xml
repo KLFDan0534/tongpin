@@ -21,7 +21,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     
     <application
-        android:label="sync_music"
+        android:label="同频"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
